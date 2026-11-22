@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.util.Log
@@ -8,7 +9,6 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
-import com.example.R
 import com.example.security.InputValidator
 import com.example.security.RateLimiter
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
@@ -37,6 +37,16 @@ internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     awaitClose { removeAuthStateListener(listener) }
 }
 
+@SuppressLint("DiscouragedApi")
+private fun resolveDefaultWebClientId(context: Context): String? {
+    return try {
+        val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+        if (resId != 0) context.getString(resId).takeIf { it.isNotBlank() } else null
+    } catch (_: Exception) {
+        null
+    }
+}
+
 fun attemptAutoSignIn(
     context: Context,
     credentialManager: CredentialManager,
@@ -48,9 +58,7 @@ fun attemptAutoSignIn(
         onAuthSuccess()
         return
     }
-    val clientId = try {
-        context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
+    val clientId = resolveDefaultWebClientId(context) ?: run {
         onUnauthenticated()
         return
     }
@@ -97,9 +105,7 @@ fun onGoogleSignInClicked(
             RateLimiter.Decision.Allowed -> Unit
         }
 
-        val clientId = try {
-            context.getString(R.string.default_web_client_id)
-        } catch (_: Exception) {
+        val clientId = resolveDefaultWebClientId(context) ?: run {
             onAuthError("Google Sign-In configuration missing.")
             return@launch
         }
