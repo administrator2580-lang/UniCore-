@@ -50,6 +50,13 @@ service cloud.firestore {
       );
     }
 
+    function isActiveAccount() {
+      return isSuperAdmin() || !(
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('accountDisabled', false) == true
+      );
+    }
+
     function isVerifiedEmailUser() {
       return isSignedIn() &&
         ('email' in request.auth.token) &&
@@ -117,6 +124,7 @@ service cloud.firestore {
         data.aiCallsToday is int && data.aiCallsToday >= 0 && data.aiCallsToday <= 1000 &&
         data.writesToday is int && data.writesToday >= 0 && data.writesToday <= 5000 &&
         data.quotaDayKey is string && data.quotaDayKey.size() >= 8 && data.quotaDayKey.size() <= 16 &&
+        (!('accountDisabled' in data) || data.accountDisabled is bool) &&
         isValidTimestamp(data.createdAt) &&
         isValidTimestamp(data.updatedAt);
     }
@@ -148,8 +156,54 @@ service cloud.firestore {
         data.instructorId is string && isValidId(data.instructorId) &&
         data.instructorName is string && data.instructorName.size() >= 2 && data.instructorName.size() <= 60 &&
         (!('materialLink' in data) || isValidHttpsUrl(data.materialLink)) &&
-        data.materialType in ['NOTES', 'PDF_LINK', 'ONEDRIVE_LINK'] &&
+        data.materialType in ['NOTES', 'PDF_LINK', 'ONEDRIVE_LINK', 'FILE'] &&
+        (!('hasAttachment' in data) || data.hasAttachment is bool) &&
+        (
+          !('hasAttachment' in data) || data.hasAttachment == false || (
+            data.attachmentName is string && data.attachmentName.size() >= 1 && data.attachmentName.size() <= 140 &&
+            data.attachmentMimeType in ['application/pdf', 'image/png', 'image/jpeg'] &&
+            data.attachmentSizeBytes is int && data.attachmentSizeBytes > 0 && data.attachmentSizeBytes <= 2097152 &&
+            data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 6 &&
+            data.attachmentSha256 is string && data.attachmentSha256.matches('^[a-fA-F0-9]{64}$')
+          )
+        ) &&
+        (!('departmentId' in data) || isValidId(data.departmentId)) &&
+        (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() >= 2 && data.departmentName.size() <= 80)) &&
+        (!('academicYear' in data) || (data.academicYear is string && data.academicYear.size() >= 1 && data.academicYear.size() <= 40)) &&
         data.published is bool &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidCourseChunk(data) {
+      return data.chunkIndex is int && data.chunkIndex >= 0 && data.chunkIndex <= 5 &&
+        data.data is string && data.data.size() >= 1 && data.data.size() <= 750000 &&
+        isValidTimestamp(data.createdAt);
+    }
+
+    function isValidDriveFolderId(id) {
+      return id is string && id.size() >= 10 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidDriveFolderLink(data) {
+      return data.folderId is string && isValidDriveFolderId(data.folderId) &&
+        data.title is string && data.title.size() >= 2 && data.title.size() <= 100 &&
+        data.folderUrl is string && isValidHttpsUrl(data.folderUrl) &&
+        data.folderUrl.matches('^https://drive\\.google\\.com/.*') &&
+        (!('departmentId' in data) || isValidId(data.departmentId)) &&
+        (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() >= 2 && data.departmentName.size() <= 80)) &&
+        (!('academicYear' in data) || (data.academicYear is string && data.academicYear.size() >= 1 && data.academicYear.size() <= 40)) &&
+        data.addedBy is string && isValidId(data.addedBy) &&
+        data.addedByName is string && data.addedByName.size() >= 2 && data.addedByName.size() <= 60 &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidDepartment(data) {
+      return data.name is string && data.name.size() >= 2 && data.name.size() <= 80 &&
+        data.years is list && data.years.size() >= 1 && data.years.size() <= 12 &&
+        data.years[0] is string && data.years[0].size() >= 1 && data.years[0].size() <= 40 &&
+        data.createdBy is string && isValidId(data.createdBy) &&
         isValidTimestamp(data.createdAt) &&
         isValidTimestamp(data.updatedAt);
     }
@@ -210,7 +264,11 @@ service cloud.firestore {
           'QUOTA_WARNING',
           'QUOTA_LOCKED',
           'ACCOUNT_INVITED',
-          'NOTIFICATION_SENT'
+          'NOTIFICATION_SENT',
+          'DRIVE_FOLDER_LINKED',
+          'ACCOUNT_STATUS_CHANGED',
+          'SUPPORT_MESSAGE_SENT',
+          'DEPARTMENT_UPDATED'
         ] &&
         data.severity in ['INFO', 'WARN', 'HIGH', 'CRITICAL'] &&
         data.targetPath is string && data.targetPath.size() >= 1 && data.targetPath.size() <= 180 &&
@@ -240,6 +298,21 @@ service cloud.firestore {
         isValidTimestamp(data.createdAt);
     }
 
+    function isValidSupportMessage(data) {
+      return data.channel in ['STUDENT_TO_ADMIN', 'ADMIN_TO_SUPER'] &&
+        data.senderUid is string && isValidId(data.senderUid) &&
+        data.senderName is string && data.senderName.size() >= 2 && data.senderName.size() <= 60 &&
+        data.senderRole in ['STUDENT', 'ADMIN'] &&
+        data.subject is string && data.subject.size() >= 2 && data.subject.size() <= 100 &&
+        data.body is string && data.body.size() >= 2 && data.body.size() <= 800 &&
+        data.status in ['OPEN', 'REPLIED'] &&
+        (!('replyText' in data) || (data.replyText is string && data.replyText.size() >= 1 && data.replyText.size() <= 800)) &&
+        (!('repliedByUid' in data) || (data.repliedByUid is string && isValidId(data.repliedByUid))) &&
+        (!('repliedByName' in data) || (data.repliedByName is string && data.repliedByName.size() >= 2 && data.repliedByName.size() <= 60)) &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
     // --- Collection Rules ---
 
     match /super_admins/{userId} {
@@ -256,8 +329,8 @@ service cloud.firestore {
     }
 
     match /admins/{userId} {
-      allow get: if isValidId(userId) && isAdmin();
-      allow list: if isAdmin();
+      allow get: if isValidId(userId) && isAdmin() && isActiveAccount();
+      allow list: if isAdmin() && isActiveAccount();
       allow create: if isValidId(userId) &&
         incoming().userId == userId &&
         incoming().keys().hasAll(['userId', 'email', 'grantedBy', 'createdAt', 'updatedAt']) &&
@@ -300,8 +373,8 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
-      allow list: if isAdmin();
+      allow get: if isValidId(userId) && (isOwner(userId) || (isAdmin() && isActiveAccount()));
+      allow list: if isAdmin() && isActiveAccount();
       allow create: if isSignedIn() &&
         isValidId(userId) &&
         isOwner(userId) &&
@@ -313,11 +386,12 @@ service cloud.firestore {
         ) &&
         incoming().aiCallsToday == 0 &&
         incoming().writesToday == 0 &&
+        (!('accountDisabled' in incoming()) || incoming().accountDisabled == false) &&
         incoming().keys().hasAll([
           'userId', 'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'createdAt', 'updatedAt'
         ]) &&
         incoming().keys().hasOnly([
-          'userId', 'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'createdAt', 'updatedAt'
+          'userId', 'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'accountDisabled', 'createdAt', 'updatedAt'
         ]) &&
         isValidUserProfile(incoming());
       allow update: if isSignedIn() &&
@@ -327,6 +401,7 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt && (
           (
             isOwner(userId) &&
+            isActiveAccount() &&
             (
               incoming().role == existing().role ||
               (existing().role == 'STUDENT' && incoming().role == 'ADMIN' && hasPendingAdminInvite())
@@ -337,8 +412,12 @@ service cloud.firestore {
           ) || (
             isSuperAdmin() &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'updatedAt'
-            ])
+              'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'accountDisabled', 'updatedAt'
+            ]) &&
+            (
+              !('accountDisabled' in incoming().diff(existing()).affectedKeys()) ||
+              userId != request.auth.uid
+            )
           )
         );
       allow delete: if isValidId(userId) && isSuperAdmin() && userId != request.auth.uid;
@@ -358,6 +437,7 @@ service cloud.firestore {
           isValidId(userId) &&
           isValidId(docId) &&
           isOwner(userId) &&
+          isActiveAccount() &&
           incoming().userId == existing().userId &&
           incoming().createdAt == existing().createdAt &&
           isValidUserPrivatePii(incoming()) &&
@@ -366,12 +446,13 @@ service cloud.firestore {
       }
 
       match /files/{fileId} {
-        allow get: if isValidId(userId) && isValidId(fileId) && (isOwner(userId) || isAdmin());
-        allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow get: if isValidId(userId) && isValidId(fileId) && isActiveAccount() && (isOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && isActiveAccount() && (isOwner(userId) || isAdmin());
         allow create: if isSignedIn() &&
           isValidId(userId) &&
           isValidId(fileId) &&
           isOwner(userId) &&
+          isActiveAccount() &&
           incoming().userId == request.auth.uid &&
           incoming().keys().hasAll([
             'userId', 'originalName', 'storedName', 'mimeType', 'sizeBytes', 'sha256Hex', 'status', 'createdAt', 'updatedAt'
@@ -381,38 +462,96 @@ service cloud.firestore {
           ]) &&
           isValidFileRecord(incoming());
         allow update: if false;
-        allow delete: if isValidId(userId) && isValidId(fileId) && (isOwner(userId) || isAdmin());
+        allow delete: if isValidId(userId) && isValidId(fileId) && isActiveAccount() && (isOwner(userId) || isAdmin());
       }
     }
 
     match /courses/{courseId} {
-      allow get: if isSignedIn() && isValidId(courseId) && (existing().published == true || isAdmin());
-      allow list: if isSignedIn() && (resource.data.published == true || isAdmin());
-      allow create: if isAdmin() &&
+      allow get: if isSignedIn() && isActiveAccount() && isValidId(courseId) && (existing().published == true || isAdmin());
+      allow list: if isSignedIn() && isActiveAccount() && (resource.data.published == true || isAdmin());
+      allow create: if isAdmin() && isActiveAccount() &&
         isValidId(courseId) &&
         incoming().instructorId == request.auth.uid &&
         incoming().keys().hasAll([
           'title', 'description', 'instructorId', 'instructorName', 'materialType', 'published', 'createdAt', 'updatedAt'
         ]) &&
         incoming().keys().hasOnly([
-          'title', 'description', 'instructorId', 'instructorName', 'materialLink', 'materialType', 'published', 'createdAt', 'updatedAt'
+          'title', 'description', 'instructorId', 'instructorName', 'materialLink', 'materialType',
+          'hasAttachment', 'attachmentName', 'attachmentMimeType', 'attachmentSizeBytes', 'chunkCount', 'attachmentSha256',
+          'departmentId', 'departmentName', 'academicYear',
+          'published', 'createdAt', 'updatedAt'
         ]) &&
         isValidCourse(incoming());
-      allow update: if isAdmin() &&
+      allow update: if isAdmin() && isActiveAccount() &&
         isValidId(courseId) &&
         isValidCourse(incoming()) &&
         incoming().instructorId == existing().instructorId &&
         incoming().createdAt == existing().createdAt &&
         incoming().diff(existing()).affectedKeys().hasOnly([
-          'title', 'description', 'instructorName', 'materialLink', 'materialType', 'published', 'updatedAt'
+          'title', 'description', 'instructorName', 'materialLink', 'materialType',
+          'hasAttachment', 'attachmentName', 'attachmentMimeType', 'attachmentSizeBytes', 'chunkCount', 'attachmentSha256',
+          'departmentId', 'departmentName', 'academicYear',
+          'published', 'updatedAt'
         ]);
-      allow delete: if isAdmin() && isValidId(courseId);
+      allow delete: if isAdmin() && isActiveAccount() && isValidId(courseId);
+
+      match /chunks/{chunkId} {
+        allow get, list: if isSignedIn() && isActiveAccount() && isValidId(courseId) && (
+          isAdmin() ||
+          get(/databases/$(database)/documents/courses/$(courseId)).data.published == true
+        );
+        allow create: if isAdmin() && isActiveAccount() &&
+          isValidId(courseId) &&
+          isValidId(chunkId) &&
+          incoming().keys().hasAll(['chunkIndex', 'data', 'createdAt']) &&
+          incoming().keys().hasOnly(['chunkIndex', 'data', 'createdAt']) &&
+          isValidCourseChunk(incoming()) &&
+          exists(/databases/$(database)/documents/courses/$(courseId));
+        allow update: if false;
+        allow delete: if isAdmin() && isActiveAccount() && isValidId(courseId) && isValidId(chunkId);
+      }
+    }
+
+    match /drive_folders/{folderDocId} {
+      allow get, list: if isSignedIn() && isActiveAccount();
+      allow create: if isAdmin() && isActiveAccount() &&
+        isValidDriveFolderId(folderDocId) &&
+        incoming().folderId == folderDocId &&
+        incoming().addedBy == request.auth.uid &&
+        incoming().keys().hasAll([
+          'folderId', 'title', 'folderUrl', 'addedBy', 'addedByName', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'folderId', 'title', 'folderUrl', 'departmentId', 'departmentName', 'academicYear',
+          'addedBy', 'addedByName', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidDriveFolderLink(incoming());
+      allow update: if false;
+      allow delete: if isAdmin() && isActiveAccount() && isValidDriveFolderId(folderDocId);
+    }
+
+    // Academic Departments & Study Years: Writable ONLY by Admins & Super Admins; Active users read
+    match /departments/{deptId} {
+      allow get, list: if isSignedIn() && isActiveAccount();
+      allow create: if isAdmin() && isActiveAccount() &&
+        isValidId(deptId) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().keys().hasAll(['name', 'years', 'createdBy', 'createdAt', 'updatedAt']) &&
+        incoming().keys().hasOnly(['name', 'years', 'createdBy', 'createdAt', 'updatedAt']) &&
+        isValidDepartment(incoming());
+      allow update: if isAdmin() && isActiveAccount() &&
+        isValidId(deptId) &&
+        isValidDepartment(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'years', 'updatedAt']);
+      allow delete: if isAdmin() && isActiveAccount() && isValidId(deptId);
     }
 
     match /quizzes/{quizId} {
-      allow get: if isSignedIn() && isValidId(quizId) && (existing().published == true || isAdmin());
-      allow list: if isSignedIn() && (resource.data.published == true || isAdmin());
-      allow create: if isAdmin() &&
+      allow get: if isSignedIn() && isActiveAccount() && isValidId(quizId) && (existing().published == true || isAdmin());
+      allow list: if isSignedIn() && isActiveAccount() && (resource.data.published == true || isAdmin());
+      allow create: if isAdmin() && isActiveAccount() &&
         isValidId(quizId) &&
         incoming().createdBy == request.auth.uid &&
         incoming().keys().hasAll([
@@ -423,7 +562,7 @@ service cloud.firestore {
         ]) &&
         isValidQuiz(incoming()) &&
         exists(/databases/$(database)/documents/courses/$(incoming().courseId));
-      allow update: if isAdmin() &&
+      allow update: if isAdmin() && isActiveAccount() &&
         isValidId(quizId) &&
         isValidQuiz(incoming()) &&
         incoming().courseId == existing().courseId &&
@@ -432,12 +571,12 @@ service cloud.firestore {
         incoming().diff(existing()).affectedKeys().hasOnly([
           'title', 'durationMinutes', 'questionPrompts', 'optionBlocks', 'published', 'updatedAt'
         ]);
-      allow delete: if isAdmin() && isValidId(quizId);
+      allow delete: if isAdmin() && isActiveAccount() && isValidId(quizId);
 
-      // Split Collection: Protected Answer Key accessible ONLY to Admins/SuperAdmins
+      // Split Collection: Protected Answer Key accessible ONLY to Active Admins/SuperAdmins
       match /private/{docId} {
-        allow get, list: if isValidId(quizId) && isAdmin();
-        allow create: if isAdmin() &&
+        allow get, list: if isValidId(quizId) && isAdmin() && isActiveAccount();
+        allow create: if isAdmin() && isActiveAccount() &&
           isValidId(quizId) &&
           docId == 'answer_key' &&
           incoming().quizId == quizId &&
@@ -446,7 +585,7 @@ service cloud.firestore {
           incoming().keys().hasOnly(['quizId', 'correctIndices', 'passingScore', 'updatedBy', 'createdAt', 'updatedAt']) &&
           isValidAnswerKey(incoming()) &&
           exists(/databases/$(database)/documents/quizzes/$(quizId));
-        allow update: if isAdmin() &&
+        allow update: if isAdmin() && isActiveAccount() &&
           isValidId(quizId) &&
           docId == 'answer_key' &&
           isValidAnswerKey(incoming()) &&
@@ -454,14 +593,14 @@ service cloud.firestore {
           incoming().createdAt == existing().createdAt &&
           incoming().updatedBy == request.auth.uid &&
           incoming().diff(existing()).affectedKeys().hasOnly(['correctIndices', 'passingScore', 'updatedBy', 'updatedAt']);
-        allow delete: if isAdmin() && isValidId(quizId);
+        allow delete: if isAdmin() && isActiveAccount() && isValidId(quizId);
       }
     }
 
     match /quiz_attempts/{attemptId} {
-      allow get: if isSignedIn() && isValidId(attemptId) && (existing().userId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
-      allow create: if isSignedIn() &&
+      allow get: if isSignedIn() && isActiveAccount() && isValidId(attemptId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && isActiveAccount() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isActiveAccount() &&
         isValidId(attemptId) &&
         attemptId == (request.auth.uid + '_' + incoming().quizId) &&
         incoming().userId == request.auth.uid &&
@@ -477,7 +616,7 @@ service cloud.firestore {
         ]) &&
         isValidQuizAttempt(incoming()) &&
         exists(/databases/$(database)/documents/quizzes/$(incoming().quizId));
-      allow update: if isAdmin() &&
+      allow update: if isAdmin() && isActiveAccount() &&
         isValidId(attemptId) &&
         isValidQuizAttempt(incoming()) &&
         (existing().status != 'GRADED' || isSuperAdmin()) &&
@@ -492,8 +631,9 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Security Audit Logs: Read strictly restricted to SUPER_ADMIN only (hidden from Students and Regular Admins)
     match /audit_logs/{logId} {
-      allow get, list: if isAdmin();
+      allow get, list: if isSuperAdmin();
       allow create: if isSignedIn() &&
         isValidId(logId) &&
         incoming().actorUid == request.auth.uid &&
@@ -509,11 +649,11 @@ service cloud.firestore {
 
     match /role_invites/{inviteId} {
       allow get: if isValidEmailDocId(inviteId) && (
-        isAdmin() ||
+        (isAdmin() && isActiveAccount()) ||
         (isVerifiedEmailUser() && request.auth.token.email.lower() == inviteId)
       );
-      allow list: if isAdmin();
-      allow create: if isAdmin() &&
+      allow list: if isAdmin() && isActiveAccount();
+      allow create: if isAdmin() && isActiveAccount() &&
         isValidEmailDocId(inviteId) &&
         incoming().email == inviteId &&
         incoming().invitedBy == request.auth.uid &&
@@ -535,6 +675,7 @@ service cloud.firestore {
           isSuperAdmin() ||
           (
             isVerifiedEmailUser() &&
+            isActiveAccount() &&
             request.auth.token.email.lower() == inviteId &&
             existing().status == 'PENDING' &&
             incoming().status == 'CLAIMED' &&
@@ -543,24 +684,24 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'claimedByUid', 'updatedAt'])
           )
         );
-      allow delete: if isValidEmailDocId(inviteId) && (
+      allow delete: if isValidEmailDocId(inviteId) && isActiveAccount() && (
         isSuperAdmin() ||
         (isAdmin() && existing().assignedRole == 'STUDENT')
       );
     }
 
     match /notifications/{notificationId} {
-      allow get: if isSignedIn() && isValidId(notificationId) && (
+      allow get: if isSignedIn() && isActiveAccount() && isValidId(notificationId) && (
         existing().targetUid == 'ALL' ||
         existing().targetUid == request.auth.uid ||
         isAdmin()
       );
-      allow list: if isSignedIn() && (
+      allow list: if isSignedIn() && isActiveAccount() && (
         resource.data.targetUid == 'ALL' ||
         resource.data.targetUid == request.auth.uid ||
         isAdmin()
       );
-      allow create: if isAdmin() &&
+      allow create: if isAdmin() && isActiveAccount() &&
         isValidId(notificationId) &&
         incoming().senderUid == request.auth.uid &&
         incoming().keys().hasAll([
@@ -571,7 +712,59 @@ service cloud.firestore {
         ]) &&
         isValidNotification(incoming());
       allow update: if false;
-      allow delete: if isAdmin() && isValidId(notificationId);
+      allow delete: if isAdmin() && isActiveAccount() && isValidId(notificationId);
+    }
+
+    // Tiered Support & Escalation Messaging:
+    // - Students -> Admins (STUDENT_TO_ADMIN)
+    // - Admins ONLY -> Super Admin (ADMIN_TO_SUPER)
+    match /support_messages/{messageId} {
+      allow get: if isSignedIn() && isActiveAccount() && isValidId(messageId) && (
+        isSuperAdmin() ||
+        existing().senderUid == request.auth.uid ||
+        (isAdmin() && existing().channel == 'STUDENT_TO_ADMIN')
+      );
+      allow list: if isSignedIn() && isActiveAccount() && (
+        isSuperAdmin() ||
+        resource.data.senderUid == request.auth.uid ||
+        (isAdmin() && resource.data.channel == 'STUDENT_TO_ADMIN')
+      );
+      allow create: if isSignedIn() && isActiveAccount() &&
+        isValidId(messageId) &&
+        incoming().senderUid == request.auth.uid &&
+        incoming().status == 'OPEN' &&
+        !('replyText' in incoming()) &&
+        !('repliedByUid' in incoming()) &&
+        !('repliedByName' in incoming()) &&
+        incoming().keys().hasAll([
+          'channel', 'senderUid', 'senderName', 'senderRole', 'subject', 'body', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'channel', 'senderUid', 'senderName', 'senderRole', 'subject', 'body', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidSupportMessage(incoming()) && (
+          (!isAdmin() && incoming().channel == 'STUDENT_TO_ADMIN' && incoming().senderRole == 'STUDENT') ||
+          (isAdmin() && !isSuperAdmin() && incoming().channel == 'ADMIN_TO_SUPER' && incoming().senderRole == 'ADMIN')
+        );
+      allow update: if isSignedIn() && isActiveAccount() &&
+        isValidId(messageId) &&
+        isValidSupportMessage(incoming()) &&
+        incoming().channel == existing().channel &&
+        incoming().senderUid == existing().senderUid &&
+        incoming().senderName == existing().senderName &&
+        incoming().senderRole == existing().senderRole &&
+        incoming().subject == existing().subject &&
+        incoming().body == existing().body &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().status == 'REPLIED' &&
+        incoming().repliedByUid == request.auth.uid &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'replyText', 'repliedByUid', 'repliedByName', 'updatedAt'
+        ]) && (
+          (existing().channel == 'STUDENT_TO_ADMIN' && isAdmin()) ||
+          (existing().channel == 'ADMIN_TO_SUPER' && isSuperAdmin())
+        );
+      allow delete: if isValidId(messageId) && isSuperAdmin();
     }
   }
 }

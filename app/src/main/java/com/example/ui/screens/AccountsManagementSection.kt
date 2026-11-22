@@ -8,11 +8,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ManageAccounts
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -43,6 +48,7 @@ import com.example.data.model.UserRole
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.viewmodel.UiState
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AccountsManagementCard(
     currentRole: UserRole,
@@ -52,7 +58,8 @@ fun AccountsManagementCard(
     onInviteAccount: (String, String, UserRole) -> Unit,
     onRevokeInvite: (String) -> Unit,
     onPromoteUser: (UserProfile) -> Unit,
-    onDemoteAdmin: (String) -> Unit
+    onDemoteAdmin: (String) -> Unit,
+    onToggleAccountDisabled: (UserProfile, Boolean) -> Unit
 ) {
     val strings = LocalAppStrings.current
     var showInviteDialog by remember { mutableStateOf(false) }
@@ -174,42 +181,97 @@ fun AccountsManagementCard(
             filteredUsers.forEach { user ->
                 val roleEnum = UserRole.fromRaw(user.role)
                 Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    color = if (user.accountDisabled) {
+                        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                    },
                     shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = user.displayName,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = when (roleEnum) {
-                                    UserRole.SUPER_ADMIN -> strings.roleSuperAdmin
-                                    UserRole.ADMIN -> strings.roleAdmin
-                                    UserRole.STUDENT -> strings.roleStudent
-                                } + " • AI ${user.aiCallsToday} • Sync ${user.writesToday}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = user.displayName,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = when (roleEnum) {
+                                        UserRole.SUPER_ADMIN -> strings.roleSuperAdmin
+                                        UserRole.ADMIN -> strings.roleAdmin
+                                        UserRole.STUDENT -> strings.roleStudent
+                                    } + " • AI ${user.aiCallsToday} • Sync ${user.writesToday}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Surface(
+                                color = if (user.accountDisabled) {
+                                    MaterialTheme.colorScheme.errorContainer
+                                } else {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                },
+                                shape = MaterialTheme.shapes.extraSmall
+                            ) {
+                                Text(
+                                    text = if (user.accountDisabled) strings.accountStatusDisabled else strings.accountStatusActive,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (user.accountDisabled) {
+                                        MaterialTheme.colorScheme.onErrorContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onSecondaryContainer
+                                    },
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
                         }
 
                         if (currentRole == UserRole.SUPER_ADMIN && user.userId != currentUserId && roleEnum != UserRole.SUPER_ADMIN) {
-                            if (roleEnum == UserRole.STUDENT) {
-                                OutlinedButton(onClick = { onPromoteUser(user) }) {
-                                    Text(strings.promoteToAdmin)
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (roleEnum == UserRole.STUDENT) {
+                                    OutlinedButton(onClick = { onPromoteUser(user) }) {
+                                        Text(strings.promoteToAdmin)
+                                    }
+                                } else if (roleEnum == UserRole.ADMIN) {
+                                    OutlinedButton(onClick = { onDemoteAdmin(user.userId) }) {
+                                        Text(strings.demoteToStudent)
+                                    }
                                 }
-                            } else if (roleEnum == UserRole.ADMIN) {
-                                OutlinedButton(onClick = { onDemoteAdmin(user.userId) }) {
-                                    Text(strings.demoteToStudent)
+
+                                val nextDisabled = !user.accountDisabled
+                                OutlinedButton(
+                                    onClick = { onToggleAccountDisabled(user, nextDisabled) },
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        contentColor = if (nextDisabled) {
+                                            MaterialTheme.colorScheme.error
+                                        } else {
+                                            MaterialTheme.colorScheme.secondary
+                                        }
+                                    ),
+                                    modifier = Modifier.testTag("toggle_account_disabled_${user.userId}")
+                                ) {
+                                    Icon(
+                                        imageVector = if (nextDisabled) Icons.Default.Block else Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.size(4.dp))
+                                    Text(if (nextDisabled) strings.disableAccountAction else strings.enableAccountAction)
                                 }
                             }
                         }

@@ -56,6 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.model.AuditLog
 import com.example.data.model.RoleInvite
+import com.example.data.model.SupportMessage
 import com.example.data.model.SystemSettings
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
@@ -79,6 +80,7 @@ fun SecurityConsoleScreen(
     auditLogsState: UiState<List<AuditLog>>,
     usersDirectoryState: UiState<List<UserProfile>>,
     roleInvitesState: UiState<List<RoleInvite>>,
+    supportMessagesState: UiState<List<SupportMessage>>,
     onSetLanguage: (AppLanguage) -> Unit,
     onSetThemeMode: (AppThemeMode) -> Unit,
     onSetSystemNotifications: (Boolean) -> Unit,
@@ -86,6 +88,9 @@ fun SecurityConsoleScreen(
     onRevokeInvite: (String) -> Unit,
     onPromoteUser: (UserProfile) -> Unit,
     onDemoteAdmin: (String) -> Unit,
+    onToggleAccountDisabled: (UserProfile, Boolean) -> Unit,
+    onSendSupportMessage: (String, String) -> Unit,
+    onReplySupportMessage: (SupportMessage, String) -> Unit,
     onUpdateSettings: (Long, Long, Boolean, Boolean) -> Unit,
     onSignOut: () -> Unit
 ) {
@@ -338,6 +343,17 @@ fun SecurityConsoleScreen(
             }
         }
 
+        // Tiered Support & Escalation Messaging (Student <-> Admin, Admin <-> Super Admin)
+        item {
+            SupportMessagingCard(
+                userRole = userRole,
+                currentUserId = currentUserId,
+                messagesState = supportMessagesState,
+                onSendMessage = onSendSupportMessage,
+                onReplyMessage = onReplySupportMessage
+            )
+        }
+
         // Accounts & Role Management (ADMIN + SUPER_ADMIN)
         if (userRole != UserRole.STUDENT) {
             item {
@@ -349,7 +365,8 @@ fun SecurityConsoleScreen(
                     onInviteAccount = onInviteAccount,
                     onRevokeInvite = onRevokeInvite,
                     onPromoteUser = onPromoteUser,
-                    onDemoteAdmin = onDemoteAdmin
+                    onDemoteAdmin = onDemoteAdmin,
+                    onToggleAccountDisabled = onToggleAccountDisabled
                 )
             }
         }
@@ -364,8 +381,8 @@ fun SecurityConsoleScreen(
             }
         }
 
-        // Collapsible Immutable Audit Logs (ADMIN + SUPER_ADMIN)
-        if (userRole != UserRole.STUDENT) {
+        // Collapsible Immutable Audit Logs (Strictly SUPER_ADMIN ONLY — hidden from Students & Regular Admins)
+        if (userRole == UserRole.SUPER_ADMIN) {
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),

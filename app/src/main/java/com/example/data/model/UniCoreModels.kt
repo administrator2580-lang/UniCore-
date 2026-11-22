@@ -19,6 +19,7 @@ enum class UserRole {
 }
 
 enum class MaterialType {
+    FILE,
     NOTES,
     PDF_LINK,
     ONEDRIVE_LINK;
@@ -53,6 +54,7 @@ data class UserProfile(
     val aiCallsToday: Long = 0L,
     val writesToday: Long = 0L,
     val quotaDayKey: String = "",
+    val accountDisabled: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -92,9 +94,56 @@ data class Course(
     val instructorName: String = "",
     val materialLink: String? = null,
     val materialType: String = MaterialType.NOTES.name,
+    val hasAttachment: Boolean = false,
+    val attachmentName: String? = null,
+    val attachmentMimeType: String? = null,
+    val attachmentSizeBytes: Long = 0L,
+    val chunkCount: Long = 0L,
+    val attachmentSha256: String? = null,
+    val departmentId: String? = null,
+    val departmentName: String? = null,
+    val academicYear: String? = null,
     val published: Boolean = true,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class DriveFolderLink(
+    @DocumentId val id: String = "",
+    val folderId: String = "",
+    val title: String = "",
+    val folderUrl: String = "",
+    val departmentId: String? = null,
+    val departmentName: String? = null,
+    val academicYear: String? = null,
+    val addedBy: String = "",
+    val addedByName: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class AcademicDepartment(
+    @DocumentId val id: String = "",
+    val name: String = "",
+    val years: List<String> = emptyList(),
+    val createdBy: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+data class DriveSyncedFile(
+    val fileId: String,
+    val folderId: String,
+    val folderTitle: String,
+    val name: String,
+    val isSubFolder: Boolean = false,
+    val mimeHint: String = "application/octet-stream",
+    val viewUrl: String,
+    val downloadUrl: String
 )
 
 @Keep
@@ -222,4 +271,34 @@ data class UniNotification(
     val senderName: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null
 )
+
+enum class SupportChannel {
+    STUDENT_TO_ADMIN,
+    ADMIN_TO_SUPER;
+
+    companion object {
+        fun fromRaw(raw: String?): SupportChannel {
+            return entries.firstOrNull { it.name == raw } ?: STUDENT_TO_ADMIN
+        }
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class SupportMessage(
+    @DocumentId val id: String = "",
+    val channel: String = SupportChannel.STUDENT_TO_ADMIN.name,
+    val senderUid: String = "",
+    val senderName: String = "",
+    val senderRole: String = UserRole.STUDENT.name,
+    val subject: String = "",
+    val body: String = "",
+    val status: String = "OPEN",
+    val replyText: String? = null,
+    val repliedByUid: String? = null,
+    val repliedByName: String? = null,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
 

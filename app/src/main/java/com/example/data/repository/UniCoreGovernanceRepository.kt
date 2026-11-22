@@ -2,16 +2,21 @@ package com.example.data.repository
 
 import com.example.data.OperationType
 import com.example.data.handleFirestoreError
+import com.example.data.model.AcademicDepartment
 import com.example.data.model.AdminRecord
 import com.example.data.model.AuditLog
 import com.example.data.model.AuditSeverity
+import com.example.data.model.DriveFolderLink
 import com.example.data.model.NotificationCategory
 import com.example.data.model.RoleInvite
+import com.example.data.model.SupportChannel
+import com.example.data.model.SupportMessage
 import com.example.data.model.SystemSettings
 import com.example.data.model.UniNotification
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
 import com.example.security.InputValidator
+import kotlinx.coroutines.flow.combine
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
@@ -137,6 +142,88 @@ class UniCoreGovernanceRepository(
                 .limit(50)
                 .snapshots()
                 .map { snap -> snap.toObjects(AuditLog::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+                .catch { error ->
+                    unwrapAndLog(error, OperationType.LIST, path, uid)
+                    throw error
+                }
+        )
+    }
+
+    fun observeDriveFolders(): Flow<List<DriveFolderLink>> = flow {
+        val uid = requireUserId()
+        val path = "drive_folders"
+        emitAll(
+            db.collection(path)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(DriveFolderLink::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt?.seconds ?: Long.MAX_VALUE }
+                }
+                .catch { error ->
+                    unwrapAndLog(error, OperationType.LIST, path, uid)
+                    throw error
+                }
+        )
+    }
+
+    fun observeDepartments(): Flow<List<AcademicDepartment>> = flow {
+        val uid = requireUserId()
+        val path = "departments"
+        emitAll(
+            db.collection(path)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(AcademicDepartment::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedBy { it.createdAt?.seconds ?: Long.MAX_VALUE }
+                }
+                .catch { error ->
+                    unwrapAndLog(error, OperationType.LIST, path, uid)
+                    throw error
+                }
+        )
+    }
+
+    fun observeSupportMessages(role: UserRole): Flow<List<SupportMessage>> = flow {
+        val uid = requireUserId()
+        val path = "support_messages"
+        val messagesFlow: Flow<List<SupportMessage>> = when (role) {
+            UserRole.SUPER_ADMIN -> {
+                db.collection(path).snapshots().map { snap ->
+                    snap.toObjects(SupportMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                }
+            }
+            UserRole.ADMIN -> {
+                val studentTicketsFlow = db.collection(path)
+                    .whereEqualTo("channel", SupportChannel.STUDENT_TO_ADMIN.name)
+                    .snapshots()
+                    .map { snap ->
+                        snap.toObjects(SupportMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    }
+                val ownAdminTicketsFlow = db.collection(path)
+                    .whereEqualTo("senderUid", uid)
+                    .snapshots()
+                    .map { snap ->
+                        snap.toObjects(SupportMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    }
+                combine(studentTicketsFlow, ownAdminTicketsFlow) { studentList, ownList ->
+                    (studentList + ownList).distinctBy { it.id }
+                }
+            }
+            UserRole.STUDENT -> {
+                db.collection(path)
+                    .whereEqualTo("senderUid", uid)
+                    .snapshots()
+                    .map { snap ->
+                        snap.toObjects(SupportMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    }
+            }
+        }
+
+        emitAll(
+            messagesFlow
+                .map { list ->
+                    list.sortedByDescending { it.updatedAt?.seconds ?: it.createdAt?.seconds ?: Long.MAX_VALUE }
+                }
                 .catch { error ->
                     unwrapAndLog(error, OperationType.LIST, path, uid)
                     throw error
@@ -298,6 +385,295 @@ class UniCoreGovernanceRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun setUserAccountDisabled(targetUser: UserProfile, disabled: Boolean): Result<Unit> {
+        val cleanUid = when (val r = InputValidator.validateId(targetUser.userId)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val docPath = "users/$cleanUid"
+        return try {
+            val actorUid = requireUserId()
+            if (cleanUid == actorUid) {
+                return Result.failure(IllegalArgumentException("You cannot disable your own Super Admin account."))
+            }
+            db.collection("users").document(cleanUid).update(
+                mapOf(
+                    "accountDisabled" to disabled,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            logAuditEvent(
+                action = "ACCOUNT_STATUS_CHANGED",
+                severity = if (disabled) AuditSeverity.HIGH else AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Super Admin ${if (disabled) "disabled" else "re-enabled"} account ${targetUser.displayName}."
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun saveDepartment(
+        existingDeptId: String?,
+        rawName: String,
+        rawYears: List<String>
+    ): Result<Unit> {
+        val cleanName = when (val r = InputValidator.validateBoundedText(rawName, "Department name", 2, 80)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val cleanYears = rawYears
+            .map { InputValidator.sanitizeText(it).take(40) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(12)
+        if (cleanYears.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Provide at least 1 study year or level."))
+        }
+        val deptId = existingDeptId?.takeIf { it.isNotBlank() }
+            ?: "dept_${UUID.randomUUID().toString().replace("-", "").take(16)}"
+        val docPath = "departments/$deptId"
+        return try {
+            val uid = requireUserId()
+            if (existingDeptId.isNullOrBlank()) {
+                db.collection("departments").document(deptId).set(
+                    mapOf(
+                        "name" to cleanName,
+                        "years" to cleanYears,
+                        "createdBy" to uid,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else {
+                db.collection("departments").document(deptId).update(
+                    mapOf(
+                        "name" to cleanName,
+                        "years" to cleanYears,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            logAuditEvent(
+                action = "DEPARTMENT_UPDATED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "${if (existingDeptId.isNullOrBlank()) "Created" else "Updated"} department '$cleanName' (${cleanYears.size} levels)."
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, if (existingDeptId.isNullOrBlank()) OperationType.CREATE else OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteDepartment(deptId: String): Result<Unit> {
+        val cleanId = when (val r = InputValidator.validateId(deptId)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val docPath = "departments/$cleanId"
+        return try {
+            requireUserId()
+            db.collection("departments").document(cleanId).delete().await()
+            logAuditEvent(
+                action = "DEPARTMENT_UPDATED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Deleted academic department."
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun linkDriveFolder(
+        rawTitle: String,
+        rawUrl: String,
+        departmentId: String? = null,
+        departmentName: String? = null,
+        academicYear: String? = null
+    ): Result<Unit> {
+        val cleanTitle = when (val r = InputValidator.validateBoundedText(rawTitle, "Folder title", 2, 100)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val (folderId, canonicalUrl) = when (val r = InputValidator.extractGoogleDriveFolder(rawUrl)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+
+        val docPath = "drive_folders/$folderId"
+        return try {
+            val uid = requireUserId()
+            val addedByName = InputValidator.sanitizeText(auth.currentUser?.displayName ?: "Admin")
+                .take(60)
+                .ifBlank { "Admin" }
+                .let { if (it.length < 2) "Admin" else it }
+
+            val payload = mutableMapOf<String, Any>(
+                "folderId" to folderId,
+                "title" to cleanTitle,
+                "folderUrl" to canonicalUrl,
+                "addedBy" to uid,
+                "addedByName" to addedByName,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (!departmentId.isNullOrBlank()) payload["departmentId"] = departmentId
+            if (!departmentName.isNullOrBlank() && departmentName.length >= 2) {
+                payload["departmentName"] = InputValidator.sanitizeText(departmentName).take(80)
+            }
+            if (!academicYear.isNullOrBlank()) {
+                payload["academicYear"] = InputValidator.sanitizeText(academicYear).take(40)
+            }
+
+            db.collection("drive_folders").document(folderId).set(payload).await()
+
+            logAuditEvent(
+                action = "DRIVE_FOLDER_LINKED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Connected Google Drive folder '$cleanTitle'."
+            )
+            sendNotification(
+                title = cleanTitle,
+                body = "$addedByName connected a live Google Drive folder to Courses.",
+                category = NotificationCategory.COURSE,
+                targetUid = "ALL"
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun unlinkDriveFolder(folderId: String): Result<Unit> {
+        val cleanId = when (val r = InputValidator.validateId(folderId)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val docPath = "drive_folders/$cleanId"
+        return try {
+            requireUserId()
+            db.collection("drive_folders").document(cleanId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun sendSupportMessage(
+        channel: SupportChannel,
+        senderRole: UserRole,
+        rawSubject: String,
+        rawBody: String
+    ): Result<Unit> {
+        val cleanSubject = when (val r = InputValidator.validateBoundedText(rawSubject, "Subject", 2, 100)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val cleanBody = when (val r = InputValidator.validateBoundedText(rawBody, "Message", 2, 800)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val msgId = "msg_${UUID.randomUUID().toString().replace("-", "").take(20)}"
+        val docPath = "support_messages/$msgId"
+        return try {
+            val uid = requireUserId()
+            val senderName = InputValidator.sanitizeText(auth.currentUser?.displayName ?: "UniCore User")
+                .take(60)
+                .ifBlank { "UniCore User" }
+                .let { if (it.length < 2) "User" else it }
+
+            val safeSenderRole = if (senderRole == UserRole.ADMIN) UserRole.ADMIN.name else UserRole.STUDENT.name
+            db.collection("support_messages").document(msgId).set(
+                mapOf(
+                    "channel" to channel.name,
+                    "senderUid" to uid,
+                    "senderName" to senderName,
+                    "senderRole" to safeSenderRole,
+                    "subject" to cleanSubject,
+                    "body" to cleanBody,
+                    "status" to "OPEN",
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            logAuditEvent(
+                action = "SUPPORT_MESSAGE_SENT",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Support inquiry (${channel.name}): $cleanSubject"
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun replyToSupportMessage(
+        message: SupportMessage,
+        rawReply: String
+    ): Result<Unit> {
+        val cleanReply = when (val r = InputValidator.validateBoundedText(rawReply, "Reply", 1, 800)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val docPath = "support_messages/${message.id}"
+        return try {
+            val uid = requireUserId()
+            val replierName = InputValidator.sanitizeText(auth.currentUser?.displayName ?: "Administrator")
+                .take(60)
+                .ifBlank { "Administrator" }
+                .let { if (it.length < 2) "Admin" else it }
+
+            db.collection("support_messages").document(message.id).update(
+                mapOf(
+                    "status" to "REPLIED",
+                    "replyText" to cleanReply,
+                    "repliedByUid" to uid,
+                    "repliedByName" to replierName,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            sendNotification(
+                title = "Reply: ${message.subject}",
+                body = "$replierName replied to your support message.",
+                category = NotificationCategory.ANNOUNCEMENT,
+                targetUid = message.senderUid
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
             Result.failure(e)
         }
     }

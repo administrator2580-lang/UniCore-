@@ -255,9 +255,9 @@ test("5. Regular Admin CANNOT access SuperAdmin settings or promote/demote Admin
   await seedRolesAndBaseData();
   const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
 
-  // Admin can read published/all courses and audit logs
+  // Admin can read courses, CANNOT read audit logs (SuperAdmin only)
   await assertSucceeds(adminDb.collection("courses").get());
-  await assertSucceeds(adminDb.collection("audit_logs").get());
+  await assertFails(adminDb.collection("audit_logs").get());
 
   // Admin CANNOT read or write super_admins
   await assertFails(adminDb.collection("super_admins").get());
@@ -414,11 +414,12 @@ test("8. Audit logs are append-only and strictly immutable even for Admins and S
     })
   );
 
-  // Student cannot read audit logs
+  // Student AND Regular Admin CANNOT read audit logs (Super Admin only)
   await assertFails(aliceDb.collection("audit_logs").get());
+  await assertFails(adminDb.collection("audit_logs").get());
 
-  // Admin & SuperAdmin can read, but CANNOT update or delete
-  await assertSucceeds(adminDb.collection("audit_logs").get());
+  // Only SuperAdmin can read, and NOBODY can update or delete
+  await assertSucceeds(superDb.collection("audit_logs").get());
   await assertFails(
     adminDb.collection("audit_logs").doc("log_001").update({ details: "Erased" })
   );
@@ -733,4 +734,319 @@ test("12. Notifications RBAC: Admins send broadcasts/targeted alerts; Students r
     bobDb.collection("notifications").where("targetUid", "in", ["ALL", STUDENT_B]).get()
   );
 });
+
+test("13. Course file chunks & Google Drive folders RBAC: Admin creates/deletes, Students read published only", async () => {
+  await seedRolesAndBaseData();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const aliceDb = testEnv.authenticatedContext(STUDENT_A).firestore();
+
+  // Admin creates FILE course with attachment metadata & chunk
+  await assertSucceeds(
+    adminDb.collection("courses").doc("course_pdf_1").set({
+      title: "Discrete Math Slides",
+      description: "Lecture 1 PDF attached directly",
+      instructorId: ADMIN_UID,
+      instructorName: "Dr. Carol",
+      materialType: "FILE",
+      hasAttachment: true,
+      attachmentName: "lecture1.pdf",
+      attachmentMimeType: "application/pdf",
+      attachmentSizeBytes: 102400,
+      chunkCount: 1,
+      attachmentSha256: "a".repeat(64),
+      published: true,
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  await assertSucceeds(
+    adminDb.collection("courses").doc("course_pdf_1").collection("chunks").doc("0").set({
+      chunkIndex: 0,
+      data: "JVBERi0xLjQK",
+      createdAt: pastDate(),
+    })
+  );
+
+  // Student CAN read published course chunks, CANNOT write/delete chunks
+  await assertSucceeds(
+    aliceDb.collection("courses").doc("course_pdf_1").collection("chunks").get()
+  );
+  await assertFails(
+    aliceDb.collection("courses").doc("course_pdf_1").collection("chunks").doc("1").set({
+      chunkIndex: 1,
+      data: "AAAA",
+      createdAt: pastDate(),
+    })
+  );
+
+  // Admin CAN connect a Google Drive folder URL; non-drive URLs rejected
+  await assertFails(
+    adminDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").set({
+      folderId: "1AbCdEfGhIjKlMnOp",
+      title: "Bad Non-Drive Host",
+      folderUrl: "https://evil.example.com/folders/1AbCdEfGhIjKlMnOp",
+      addedBy: ADMIN_UID,
+      addedByName: "Dr. Carol",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  await assertSucceeds(
+    adminDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").set({
+      folderId: "1AbCdEfGhIjKlMnOp",
+      title: "CS Drive Folder",
+      folderUrl: "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp",
+      addedBy: ADMIN_UID,
+      addedByName: "Dr. Carol",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Student CAN list drive_folders, CANNOT create or delete
+  await assertSucceeds(aliceDb.collection("drive_folders").get());
+  await assertFails(
+    aliceDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").delete()
+  );
+});
+
+test("14. Super Admin can disable/re-enable accounts without deleting; disabled users are blocked from all collections", async () => {
+  await seedRolesAndBaseData();
+  const superDb = testEnv
+    .authenticatedContext(SUPER_ADMIN_UID, { email: BOOTSTRAP_EMAIL, email_verified: true })
+    .firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const aliceDb = testEnv.authenticatedContext(STUDENT_A).firestore();
+
+  // Regular Admin CANNOT disable Student Alice
+  await assertFails(
+    adminDb.collection("users").doc(STUDENT_A).update({
+      accountDisabled: true,
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Student Alice CANNOT toggle her own accountDisabled status
+  await assertFails(
+    aliceDb.collection("users").doc(STUDENT_A).update({
+      accountDisabled: true,
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Super Admin CANNOT disable themselves
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("users").doc(SUPER_ADMIN_UID).set({
+      userId: SUPER_ADMIN_UID,
+      displayName: "Super Dave",
+      role: "SUPER_ADMIN",
+      aiCallsToday: 0,
+      writesToday: 0,
+      quotaDayKey: "2026-11-22",
+      createdAt: pastDate(5000),
+      updatedAt: pastDate(5000),
+    });
+  });
+  await assertFails(
+    superDb.collection("users").doc(SUPER_ADMIN_UID).update({
+      accountDisabled: true,
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Super Admin disables Student Alice
+  await assertSucceeds(
+    superDb.collection("users").doc(STUDENT_A).update({
+      accountDisabled: true,
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Disabled Alice can still read her own profile (to render Suspended banner)
+  await assertSucceeds(aliceDb.collection("users").doc(STUDENT_A).get());
+
+  // Disabled Alice is blocked from courses, drive folders, quizzes, attempts, and notifications
+  await assertFails(aliceDb.collection("courses").where("published", "==", true).get());
+  await assertFails(aliceDb.collection("drive_folders").get());
+  await assertFails(aliceDb.collection("quizzes").where("published", "==", true).get());
+  await assertFails(
+    aliceDb.collection("notifications").where("targetUid", "in", ["ALL", STUDENT_A]).get()
+  );
+
+  // Super Admin re-enables Alice without losing her record
+  await assertSucceeds(
+    superDb.collection("users").doc(STUDENT_A).update({
+      accountDisabled: false,
+      updatedAt: pastDate(100),
+    })
+  );
+  await assertSucceeds(aliceDb.collection("courses").where("published", "==", true).get());
+  await assertSucceeds(aliceDb.collection("drive_folders").get());
+});
+
+test("15. Support messaging RBAC: Students contact Admins only; Admins ONLY contact Super Admin", async () => {
+  await seedRolesAndBaseData();
+  const aliceDb = testEnv.authenticatedContext(STUDENT_A).firestore();
+  const bobDb = testEnv.authenticatedContext(STUDENT_B).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const superDb = testEnv
+    .authenticatedContext(SUPER_ADMIN_UID, { email: BOOTSTRAP_EMAIL, email_verified: true })
+    .firestore();
+
+  // Student Alice sends message to Admin
+  await assertSucceeds(
+    aliceDb.collection("support_messages").doc("msg_alice_1").set({
+      channel: "STUDENT_TO_ADMIN",
+      senderUid: STUDENT_A,
+      senderName: "Alice Student",
+      senderRole: "STUDENT",
+      subject: "Need PDF clarification",
+      body: "Can you re-upload slide 4?",
+      status: "OPEN",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Student CANNOT contact Super Admin directly via ADMIN_TO_SUPER channel
+  await assertFails(
+    aliceDb.collection("support_messages").doc("msg_alice_illegal").set({
+      channel: "ADMIN_TO_SUPER",
+      senderUid: STUDENT_A,
+      senderName: "Alice Student",
+      senderRole: "STUDENT",
+      subject: "Bypass",
+      body: "Trying to reach super admin",
+      status: "OPEN",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Student Bob CANNOT read Alice's message
+  await assertFails(bobDb.collection("support_messages").doc("msg_alice_1").get());
+
+  // Admin CAN read and reply to Student Alice's message
+  await assertSucceeds(
+    adminDb.collection("support_messages").where("channel", "==", "STUDENT_TO_ADMIN").get()
+  );
+  await assertSucceeds(
+    adminDb.collection("support_messages").doc("msg_alice_1").update({
+      status: "REPLIED",
+      replyText: "Slide 4 has been updated cleanly.",
+      repliedByUid: ADMIN_UID,
+      repliedByName: "Dr. Carol",
+      updatedAt: pastDate(200),
+    })
+  );
+
+  // Admin Carol sends ADMIN_TO_SUPER message to Super Admin
+  await assertSucceeds(
+    adminDb.collection("support_messages").doc("msg_admin_1").set({
+      channel: "ADMIN_TO_SUPER",
+      senderUid: ADMIN_UID,
+      senderName: "Dr. Carol",
+      senderRole: "ADMIN",
+      subject: "Quota increase request",
+      body: "Need higher daily write cap for exam week.",
+      status: "OPEN",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Student CANNOT read Admin-to-SuperAdmin messages
+  await assertFails(aliceDb.collection("support_messages").doc("msg_admin_1").get());
+
+  // Regular Admin CANNOT reply to their own ADMIN_TO_SUPER ticket
+  await assertFails(
+    adminDb.collection("support_messages").doc("msg_admin_1").update({
+      status: "REPLIED",
+      replyText: "Self-approved",
+      repliedByUid: ADMIN_UID,
+      repliedByName: "Dr. Carol",
+      updatedAt: pastDate(100),
+    })
+  );
+
+  // Super Admin CAN read and reply to Admin Carol's message
+  await assertSucceeds(superDb.collection("support_messages").get());
+  await assertSucceeds(
+    superDb.collection("support_messages").doc("msg_admin_1").update({
+      status: "REPLIED",
+      replyText: "Write cap raised to 250.",
+      repliedByUid: SUPER_ADMIN_UID,
+      repliedByName: "Super Dave",
+      updatedAt: pastDate(50),
+    })
+  );
+});
+
+test("16. Academic Departments & Years RBAC: Only Admins and SuperAdmins can create/edit/delete departments", async () => {
+  await seedRolesAndBaseData();
+  const aliceDb = testEnv.authenticatedContext(STUDENT_A).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const superDb = testEnv
+    .authenticatedContext(SUPER_ADMIN_UID, { email: BOOTSTRAP_EMAIL, email_verified: true })
+    .firestore();
+
+  // Student CANNOT create a department
+  await assertFails(
+    aliceDb.collection("departments").doc("dept_re").set({
+      name: "طاقة متجددة",
+      years: ["الفرقة الأولى", "الفرقة الثانية"],
+      createdBy: STUDENT_A,
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Admin CAN create a department with study years
+  await assertSucceeds(
+    adminDb.collection("departments").doc("dept_re").set({
+      name: "طاقة متجددة",
+      years: ["الفرقة الأولى", "الفرقة الثانية", "الفرقة الثالثة", "الفرقة الرابعة"],
+      createdBy: ADMIN_UID,
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Active Student CAN read departments
+  await assertSucceeds(aliceDb.collection("departments").get());
+
+  // Student CANNOT edit or delete a department
+  await assertFails(
+    aliceDb.collection("departments").doc("dept_re").update({
+      name: "Hacked Dept",
+      updatedAt: pastDate(100),
+    })
+  );
+  await assertFails(aliceDb.collection("departments").doc("dept_re").delete());
+
+  // Super Admin CAN edit departments created by Admin
+  await assertSucceeds(
+    superDb.collection("departments").doc("dept_re").update({
+      name: "هندسة الطاقة المتجددة",
+      years: ["الفرقة الأولى", "الفرقة الثانية", "الفرقة الثالثة", "الفرقة الرابعة"],
+      updatedAt: pastDate(100),
+    })
+  );
+
+  // Admin CAN assign a course to a Department & Academic Year
+  await assertSucceeds(
+    adminDb.collection("courses").doc("course_cs101").update({
+      departmentId: "dept_re",
+      departmentName: "هندسة الطاقة المتجددة",
+      academicYear: "الفرقة الأولى",
+      updatedAt: pastDate(50),
+    })
+  );
+});
+
+
+
+
 

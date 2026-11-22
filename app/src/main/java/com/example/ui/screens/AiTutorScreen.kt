@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.PauseCircle
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -31,6 +32,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -60,6 +62,7 @@ fun AiTutorScreen(
     aiState: AiUiState,
     quotaSnapshot: ZeroCostQuotaManager.QuotaSnapshot,
     onAskTutor: (String) -> Unit,
+    onCancelTutor: () -> Unit,
     onClearTutor: () -> Unit
 ) {
     val strings = LocalAppStrings.current
@@ -176,25 +179,47 @@ fun AiTutorScreen(
                 .testTag("ai_prompt_input")
         )
 
-        Button(
-            onClick = { onAskTutor(prompt) },
-            enabled = aiState !is AiUiState.Loading &&
-                quotaSnapshot.aiHealth != ZeroCostQuotaManager.QuotaHealth.PAUSED_LIMIT_REACHED,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(50.dp)
-                .testTag("ask_ai_button")
+        val isBusy = aiState is AiUiState.Loading || aiState is AiUiState.Streaming
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            if (aiState is AiUiState.Loading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    color = MaterialTheme.colorScheme.onPrimary,
-                    strokeWidth = 2.dp
-                )
-            } else {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.size(8.dp))
-                Text(strings.askTutorButton)
+            Button(
+                onClick = { onAskTutor(prompt) },
+                enabled = !isBusy &&
+                    quotaSnapshot.aiHealth != ZeroCostQuotaManager.QuotaHealth.PAUSED_LIMIT_REACHED,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(50.dp)
+                    .testTag("ask_ai_button")
+            ) {
+                if (isBusy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(Modifier.size(8.dp))
+                    Text(strings.tutorConnecting)
+                } else {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(8.dp))
+                    Text(strings.askTutorButton)
+                }
+            }
+
+            if (isBusy) {
+                OutlinedButton(
+                    onClick = onCancelTutor,
+                    modifier = Modifier
+                        .height(50.dp)
+                        .testTag("cancel_ai_button")
+                ) {
+                    Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(6.dp))
+                    Text(strings.stopAiAction)
+                }
             }
         }
 

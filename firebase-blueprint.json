@@ -52,6 +52,7 @@
         "aiCallsToday": { "type": "integer", "description": "Daily AI Logic usage counter." },
         "writesToday": { "type": "integer", "description": "Daily Firestore write counter." },
         "quotaDayKey": { "type": "string", "description": "UTC date string YYYY-MM-DD for quota reset." },
+        "accountDisabled": { "type": "boolean", "description": "If true, account is temporarily suspended by Super Admin without deletion." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
       },
@@ -88,7 +89,7 @@
     },
     "Course": {
       "title": "Course",
-      "description": "Educational course with validated HTTPS study resource links.",
+      "description": "Educational course with direct attached PDF/image files or HTTPS study resource links.",
       "type": "object",
       "properties": {
         "title": { "type": "string" },
@@ -96,12 +97,63 @@
         "instructorId": { "type": "string" },
         "instructorName": { "type": "string" },
         "materialLink": { "type": "string" },
-        "materialType": { "type": "string", "enum": ["NOTES", "PDF_LINK", "ONEDRIVE_LINK"] },
+        "materialType": { "type": "string", "enum": ["NOTES", "PDF_LINK", "ONEDRIVE_LINK", "FILE"] },
+        "hasAttachment": { "type": "boolean" },
+        "attachmentName": { "type": "string" },
+        "attachmentMimeType": { "type": "string" },
+        "attachmentSizeBytes": { "type": "integer" },
+        "chunkCount": { "type": "integer" },
+        "attachmentSha256": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "academicYear": { "type": "string" },
         "published": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["title", "description", "instructorId", "instructorName", "materialType", "published", "createdAt", "updatedAt"]
+    },
+    "CourseFileChunk": {
+      "title": "CourseFileChunk",
+      "description": "Base64 file chunk stored in /courses/{courseId}/chunks/{chunkId} for zero-cost direct file sharing.",
+      "type": "object",
+      "properties": {
+        "chunkIndex": { "type": "integer" },
+        "data": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["chunkIndex", "data", "createdAt"]
+    },
+    "DriveFolderLink": {
+      "title": "DriveFolderLink",
+      "description": "Connected shared Google Drive folder for automatic live file sync in /drive_folders/{folderId}.",
+      "type": "object",
+      "properties": {
+        "folderId": { "type": "string" },
+        "title": { "type": "string" },
+        "folderUrl": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "academicYear": { "type": "string" },
+        "addedBy": { "type": "string" },
+        "addedByName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["folderId", "title", "folderUrl", "addedBy", "addedByName", "createdAt", "updatedAt"]
+    },
+    "AcademicDepartment": {
+      "title": "AcademicDepartment",
+      "description": "Academic department and its study years/levels manageable exclusively by Admins and Super Admins.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "years": { "type": "array" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "years", "createdBy", "createdAt", "updatedAt"]
     },
     "Quiz": {
       "title": "Quiz",
@@ -199,6 +251,26 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["title", "body", "category", "targetUid", "senderUid", "senderName", "createdAt"]
+    },
+    "SupportMessage": {
+      "title": "SupportMessage",
+      "description": "Direct tiered communication: Students -> Admins (STUDENT_TO_ADMIN) and Admins -> Super Admin (ADMIN_TO_SUPER).",
+      "type": "object",
+      "properties": {
+        "channel": { "type": "string", "enum": ["STUDENT_TO_ADMIN", "ADMIN_TO_SUPER"] },
+        "senderUid": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderRole": { "type": "string", "enum": ["STUDENT", "ADMIN"] },
+        "subject": { "type": "string" },
+        "body": { "type": "string" },
+        "status": { "type": "string", "enum": ["OPEN", "REPLIED"] },
+        "replyText": { "type": "string" },
+        "repliedByUid": { "type": "string" },
+        "repliedByName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["channel", "senderUid", "senderName", "senderRole", "subject", "body", "status", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -230,6 +302,18 @@
       "schema": { "$ref": "#/entities/Course" },
       "description": "Published and draft educational courses."
     },
+    "/courses/{courseId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/CourseFileChunk" },
+      "description": "Chunked Base64 PDF/image bytes attached to a course."
+    },
+    "/drive_folders/{folderId}": {
+      "schema": { "$ref": "#/entities/DriveFolderLink" },
+      "description": "Connected shared Google Drive folders for auto-sync."
+    },
+    "/departments/{deptId}": {
+      "schema": { "$ref": "#/entities/AcademicDepartment" },
+      "description": "Academic departments and years/levels writable only by Admins and Super Admins."
+    },
     "/quizzes/{quizId}": {
       "schema": { "$ref": "#/entities/Quiz" },
       "description": "Quizzes without answer keys."
@@ -253,6 +337,10 @@
     "/notifications/{notificationId}": {
       "schema": { "$ref": "#/entities/UniNotification" },
       "description": "Broadcast and per-user platform notifications."
+    },
+    "/support_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/SupportMessage" },
+      "description": "Tiered support messages (Student -> Admin, Admin -> Super Admin)."
     }
   }
 }

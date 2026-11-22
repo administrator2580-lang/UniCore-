@@ -5,16 +5,23 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.FolderSpecial
@@ -25,6 +32,9 @@ import androidx.compose.material.icons.filled.Quiz
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,6 +81,7 @@ import com.example.data.preferences.AppThemeMode
 import com.example.data.preferences.UserPreferences
 import com.example.data.preferences.UserPreferencesRepository
 import com.example.data.repository.AiTutorRepository
+import com.example.data.repository.GoogleDriveSyncRepository
 import com.example.data.repository.UniCoreGovernanceRepository
 import com.example.data.repository.UniCoreRepository
 import com.example.data.repository.signOut
@@ -229,6 +240,7 @@ private fun UniCoreAuthenticatedShell(
                     repository = UniCoreRepository(db),
                     governance = UniCoreGovernanceRepository(db),
                     aiRepository = AiTutorRepository(),
+                    driveSyncRepository = GoogleDriveSyncRepository(),
                     rateLimiter = RateLimiter(app.applicationContext),
                     currentUserId = currentUserId
                 )
@@ -248,15 +260,32 @@ private fun UniCoreAuthenticatedShell(
     val systemSettings by viewModel.systemSettings.collectAsStateWithLifecycle()
     val quotaSnapshot by viewModel.quotaSnapshot.collectAsStateWithLifecycle()
     val coursesState by viewModel.coursesState.collectAsStateWithLifecycle()
+    val departmentsState by viewModel.departmentsState.collectAsStateWithLifecycle()
+    val driveFoldersState by viewModel.driveFoldersState.collectAsStateWithLifecycle()
+    val driveFilesState by viewModel.driveFilesState.collectAsStateWithLifecycle()
+    val isDriveRefreshing by viewModel.isDriveRefreshing.collectAsStateWithLifecycle()
+    val openingCourseId by viewModel.openingCourseId.collectAsStateWithLifecycle()
+    val openingDriveFileId by viewModel.openingDriveFileId.collectAsStateWithLifecycle()
     val quizzesState by viewModel.quizzesState.collectAsStateWithLifecycle()
     val attemptsState by viewModel.attemptsState.collectAsStateWithLifecycle()
     val filesState by viewModel.verifiedFilesState.collectAsStateWithLifecycle()
     val notificationsState by viewModel.notificationsState.collectAsStateWithLifecycle()
+    val supportMessagesState by viewModel.supportMessagesState.collectAsStateWithLifecycle()
     val usersDirectoryState by viewModel.usersDirectoryState.collectAsStateWithLifecycle()
     val roleInvitesState by viewModel.roleInvitesState.collectAsStateWithLifecycle()
     val auditLogsState by viewModel.auditLogsState.collectAsStateWithLifecycle()
     val aiUiState by viewModel.aiUiState.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
+
+    if (userProfile?.accountDisabled == true && userRole != UserRole.SUPER_ADMIN) {
+        AccountSuspendedGate(
+            title = strings.accountSuspendedTitle,
+            body = strings.accountSuspendedBody,
+            signOutLabel = strings.signOutAction,
+            onSignOut = { signOut(credentialManager, scope) }
+        )
+        return
+    }
 
     val notifications = (notificationsState as? UiState.Success)?.data.orEmpty()
     val unreadCount = remember(notifications, prefs.readNotificationIds) {
@@ -428,9 +457,31 @@ private fun UniCoreAuthenticatedShell(
                         when (selectedTab) {
                             UniCoreTab.COURSES -> CoursesScreen(
                                 coursesState = coursesState,
+                                departmentsState = departmentsState,
+                                driveFoldersState = driveFoldersState,
+                                driveFilesState = driveFilesState,
+                                isDriveRefreshing = isDriveRefreshing,
+                                openingCourseId = openingCourseId,
+                                openingDriveFileId = openingDriveFileId,
                                 userRole = userRole,
-                                onCreateCourse = viewModel::createCourse,
-                                onDeleteCourse = viewModel::deleteCourse
+                                onCreateCourseWithFile = { title, desc, link, type, uri, deptId, deptName, year ->
+                                    viewModel.createCourseWithOptionalFile(
+                                        context, title, desc, link, type, uri, deptId, deptName, year
+                                    )
+                                },
+                                onUpdateCourseDetails = viewModel::updateCourseDetails,
+                                onDeleteCourse = viewModel::deleteCourse,
+                                onOpenCourseAttachment = { course ->
+                                    viewModel.openCourseAttachment(context, course)
+                                },
+                                onSaveDepartment = viewModel::saveDepartment,
+                                onDeleteDepartment = viewModel::deleteDepartment,
+                                onLinkDriveFolder = viewModel::linkDriveFolder,
+                                onUnlinkDriveFolder = viewModel::unlinkDriveFolder,
+                                onRefreshDrive = viewModel::refreshDriveFilesNow,
+                                onOpenDriveFile = { item ->
+                                    viewModel.openDriveSyncedFile(context, item)
+                                }
                             )
                             UniCoreTab.QUIZZES -> QuizzesScreen(
                                 quizzesState = quizzesState,
@@ -446,6 +497,7 @@ private fun UniCoreAuthenticatedShell(
                                 aiState = aiUiState,
                                 quotaSnapshot = quotaSnapshot,
                                 onAskTutor = { prompt -> viewModel.askAiTutor(prompt, prefs.language) },
+                                onCancelTutor = viewModel::cancelAiTutor,
                                 onClearTutor = viewModel::clearAiState
                             )
                             UniCoreTab.VAULT -> SecureFilesVaultScreen(
@@ -464,6 +516,7 @@ private fun UniCoreAuthenticatedShell(
                                 auditLogsState = auditLogsState,
                                 usersDirectoryState = usersDirectoryState,
                                 roleInvitesState = roleInvitesState,
+                                supportMessagesState = supportMessagesState,
                                 onSetLanguage = onSetLanguage,
                                 onSetThemeMode = { mode ->
                                     scope.launch { prefsRepository.setThemeMode(mode) }
@@ -475,6 +528,9 @@ private fun UniCoreAuthenticatedShell(
                                 onRevokeInvite = viewModel::revokeInvite,
                                 onPromoteUser = viewModel::promoteUserToAdmin,
                                 onDemoteAdmin = viewModel::demoteAdminToStudent,
+                                onToggleAccountDisabled = viewModel::setUserAccountDisabled,
+                                onSendSupportMessage = viewModel::sendSupportMessage,
+                                onReplySupportMessage = viewModel::replyToSupportMessage,
                                 onUpdateSettings = viewModel::updateSystemSettings,
                                 onSignOut = { signOut(credentialManager, scope) }
                             )
@@ -502,5 +558,66 @@ private fun UniCoreAuthenticatedShell(
                 scope.launch { prefsRepository.setSystemNotificationsEnabled(granted) }
             }
         )
+    }
+}
+
+@Composable
+private fun AccountSuspendedGate(
+    title: String,
+    body: String,
+    signOutLabel: String,
+    onSignOut: () -> Unit
+) {
+    Scaffold(contentWindowInsets = WindowInsets.safeDrawing) { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(24.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier.widthIn(max = 460.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Block,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Text(
+                        text = body,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Button(
+                        onClick = onSignOut,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("suspended_sign_out_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Logout,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.size(8.dp))
+                        Text(signOutLabel)
+                    }
+                }
+            }
+        }
     }
 }

@@ -26,13 +26,19 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.snapshots
+import android.util.Base64
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.security.MessageDigest
 import java.util.Locale
 
 class UniCoreRepository(
@@ -47,6 +53,8 @@ class UniCoreRepository(
 
     companion object {
         const val BOOTSTRAPPED_SUPER_ADMIN_EMAIL = "fvathyvhmed@gmail.com"
+        const val MAX_INLINE_COURSE_FILE_BYTES = 2_097_152L // 2 MB Spark-plan chunk limit
+        private const val CHUNK_RAW_BYTES = 512 * 1024 // 512 KB raw -> ~683 KB Base64 (< 750 KB rule)
     }
 
     internal fun requireUserId(): String {
@@ -321,9 +329,15 @@ class UniCoreRepository(
         materialLink: String?,
         materialType: MaterialType,
         published: Boolean,
-        governance: UniCoreGovernanceRepository
+        governance: UniCoreGovernanceRepository,
+        attachedFile: SecureFileValidator.ValidatedFile? = null,
+        departmentId: String? = null,
+        departmentName: String? = null,
+        academicYear: String? = null
     ): Result<Unit> {
         var docPath = "courses"
+        val docRef = db.collection("courses").document()
+        var createdDoc = false
         return try {
             val uid = requireUserId()
             val cleanTitle = when (val r = InputValidator.validateBoundedText(title, "Course title", 3, 100)) {
@@ -339,31 +353,102 @@ class UniCoreRepository(
                 is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
             }
 
+            val encodedChunks = if (attachedFile != null) {
+                if (attachedFile.sizeBytes > MAX_INLINE_COURSE_FILE_BYTES) {
+                    return Result.failure(
+                        IllegalArgumentException(
+                            "Direct file uploads are limited to 2 MB. For larger files, connect a Google Drive folder instead."
+                        )
+                    )
+                }
+                withContext(Dispatchers.IO) {
+                    val fileBytes = File(attachedFile.sandboxPath).readBytes()
+                    if (fileBytes.isEmpty()) throw IllegalStateException("Selected attachment is empty.")
+                    val chunks = mutableListOf<String>()
+                    var offset = 0
+                    while (offset < fileBytes.size) {
+                        val end = (offset + CHUNK_RAW_BYTES).coerceAtMost(fileBytes.size)
+                        val slice = fileBytes.copyOfRange(offset, end)
+                        chunks.add(Base64.encodeToString(slice, Base64.NO_WRAP))
+                        offset = end
+                    }
+                    chunks
+                }
+            } else {
+                emptyList()
+            }
+
+            if (encodedChunks.size > 6) {
+                return Result.failure(IllegalArgumentException("Attached file exceeds maximum chunk count."))
+            }
+
             val instructorName = InputValidator.sanitizeText(auth.currentUser?.displayName ?: "Instructor")
                 .take(60)
                 .ifBlank { "Instructor" }
                 .let { if (it.length < 2) "Instructor" else it }
 
-            val docRef = db.collection("courses").document()
+            val resolvedType = if (attachedFile != null) MaterialType.FILE else materialType
             docPath = docRef.path
-            val payload = mapOf(
+
+            val payload = mutableMapOf<String, Any>(
                 "title" to cleanTitle,
                 "description" to cleanDesc,
                 "instructorId" to uid,
                 "instructorName" to instructorName,
-                "materialLink" to cleanLink,
-                "materialType" to materialType.name,
-                "published" to published,
+                "materialType" to resolvedType.name,
+                "hasAttachment" to (attachedFile != null),
+                "published" to if (attachedFile != null) false else published,
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
-            ).filterValues { it != null }
+            )
+            if (cleanLink != null) payload["materialLink"] = cleanLink
+            if (!departmentId.isNullOrBlank()) payload["departmentId"] = departmentId
+            if (!departmentName.isNullOrBlank() && departmentName.length >= 2) {
+                payload["departmentName"] = InputValidator.sanitizeText(departmentName).take(80)
+            }
+            if (!academicYear.isNullOrBlank()) {
+                payload["academicYear"] = InputValidator.sanitizeText(academicYear).take(40)
+            }
+            if (attachedFile != null) {
+                payload["attachmentName"] = attachedFile.originalName.take(140)
+                payload["attachmentMimeType"] = attachedFile.mimeType
+                payload["attachmentSizeBytes"] = attachedFile.sizeBytes
+                payload["chunkCount"] = encodedChunks.size.toLong()
+                payload["attachmentSha256"] = attachedFile.sha256Hex
+            }
 
             docRef.set(payload).await()
+            createdDoc = true
+
+            if (attachedFile != null) {
+                encodedChunks.forEachIndexed { index, base64Data ->
+                    docRef.collection("chunks").document(index.toString()).set(
+                        mapOf(
+                            "chunkIndex" to index.toLong(),
+                            "data" to base64Data,
+                            "createdAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+                if (published) {
+                    docRef.update(
+                        mapOf(
+                            "published" to true,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+            }
+
             incrementDailyCounter(uid, isAi = false)
             if (published) {
                 governance.sendNotification(
                     title = cleanTitle,
-                    body = "$instructorName published new course material.",
+                    body = if (attachedFile != null) {
+                        "$instructorName uploaded ${attachedFile.originalName}."
+                    } else {
+                        "$instructorName published new course material."
+                    },
                     category = NotificationCategory.COURSE,
                     targetUid = "ALL"
                 )
@@ -372,15 +457,147 @@ class UniCoreRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (createdDoc && attachedFile != null) {
+                runCatching { deleteCourse(docRef.id) }
+            }
             handleFirestoreError(e, OperationType.CREATE, docPath)
             Result.failure(e)
         }
     }
 
+    suspend fun updateCourseDetails(
+        courseId: String,
+        title: String,
+        description: String,
+        departmentId: String?,
+        departmentName: String?,
+        academicYear: String?
+    ): Result<Unit> {
+        val docPath = "courses/$courseId"
+        return try {
+            requireUserId()
+            val cleanTitle = when (val r = InputValidator.validateBoundedText(title, "Course title", 3, 100)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanDesc = when (val r = InputValidator.validateBoundedText(description, "Description", 1, 600)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val updates = mutableMapOf<String, Any>(
+                "title" to cleanTitle,
+                "description" to cleanDesc,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (!departmentId.isNullOrBlank()) {
+                updates["departmentId"] = departmentId
+            } else {
+                updates["departmentId"] = FieldValue.delete()
+            }
+            if (!departmentName.isNullOrBlank() && departmentName.length >= 2) {
+                updates["departmentName"] = InputValidator.sanitizeText(departmentName).take(80)
+            } else {
+                updates["departmentName"] = FieldValue.delete()
+            }
+            if (!academicYear.isNullOrBlank()) {
+                updates["academicYear"] = InputValidator.sanitizeText(academicYear).take(40)
+            } else {
+                updates["academicYear"] = FieldValue.delete()
+            }
+            db.collection("courses").document(courseId).update(updates).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun downloadOrOpenCourseAttachment(context: Context, course: Course): Result<File> {
+        val docPath = "courses/${course.id}/chunks"
+        return try {
+            requireUserId()
+            if (!course.hasAttachment || course.chunkCount <= 0L || course.attachmentSha256.isNullOrBlank()) {
+                return Result.failure(IllegalStateException("This course does not have a downloadable attachment."))
+            }
+            val safeName = (course.attachmentName ?: "material.pdf")
+                .replace(Regex("[^a-zA-Z0-9._\\-\\u0600-\\u06FF ]"), "_")
+                .take(80)
+                .ifBlank { "material.pdf" }
+            val cacheDir = File(context.filesDir, "course_cache").apply { mkdirs() }
+            val targetFile = File(cacheDir, "course_${course.id}_$safeName")
+            if (!targetFile.canonicalPath.startsWith(cacheDir.canonicalPath + File.separator)) {
+                return Result.failure(SecurityException("Invalid local cache path."))
+            }
+
+            if (targetFile.exists() && targetFile.length() > 0L) {
+                val existingSha = withContext(Dispatchers.IO) {
+                    sha256Hex(targetFile.readBytes())
+                }
+                if (existingSha.equals(course.attachmentSha256, ignoreCase = true)) {
+                    return Result.success(targetFile)
+                }
+                targetFile.delete()
+            }
+
+            val chunkSnapshots = db.collection("courses")
+                .document(course.id)
+                .collection("chunks")
+                .get()
+                .await()
+
+            val orderedChunks = chunkSnapshots.documents
+                .mapNotNull { doc ->
+                    val idx = doc.getLong("chunkIndex") ?: doc.id.toLongOrNull() ?: return@mapNotNull null
+                    val data = doc.getString("data") ?: return@mapNotNull null
+                    idx to data
+                }
+                .sortedBy { it.first }
+
+            if (orderedChunks.size.toLong() < course.chunkCount) {
+                return Result.failure(IllegalStateException("Attachment chunks are incomplete."))
+            }
+
+            val assembledBytes = withContext(Dispatchers.IO) {
+                val out = ByteArrayOutputStream()
+                orderedChunks.forEach { (_, b64) ->
+                    out.write(Base64.decode(b64, Base64.DEFAULT))
+                }
+                out.toByteArray()
+            }
+
+            val actualSha = sha256Hex(assembledBytes)
+            if (!actualSha.equals(course.attachmentSha256, ignoreCase = true)) {
+                return Result.failure(SecurityException("File integrity check (SHA-256) failed."))
+            }
+
+            withContext(Dispatchers.IO) {
+                val tmp = File(cacheDir, "course_${course.id}_$safeName.tmp")
+                tmp.writeBytes(assembledBytes)
+                if (targetFile.exists()) targetFile.delete()
+                tmp.renameTo(targetFile)
+            }
+            Result.success(targetFile)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, docPath)
+            Result.failure(e)
+        }
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
     suspend fun deleteCourse(courseId: String): Result<Unit> {
         val docPath = "courses/$courseId"
         return try {
             requireUserId()
+            runCatching {
+                val chunks = db.collection("courses").document(courseId).collection("chunks").get().await()
+                chunks.documents.forEach { it.reference.delete().await() }
+            }
             db.collection("courses").document(courseId).delete().await()
             Result.success(Unit)
         } catch (e: CancellationException) {

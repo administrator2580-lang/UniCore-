@@ -96,6 +96,28 @@ object InputValidator {
         }
     }
 
+    private val DRIVE_FOLDER_ID_REGEX = Regex("^[a-zA-Z0-9_-]{10,128}$")
+    private val DRIVE_URL_FOLDER_REGEX = Regex("^https://drive\\.google\\.com/(?:drive/(?:u/\\d+/)?folders/|open\\?id=)([a-zA-Z0-9_-]{10,128}).*$")
+
+    /**
+     * Extracts and validates a Google Drive folder ID and canonical HTTPS URL.
+     */
+    fun extractGoogleDriveFolder(rawInput: String): ValidationResult<Pair<String, String>> {
+        val trimmed = rawInput.trim()
+        if (containsInjectionPayload(trimmed)) {
+            return ValidationResult.Invalid("Drive link contains disallowed characters.")
+        }
+        val match = DRIVE_URL_FOLDER_REGEX.matchEntire(trimmed)
+        if (match != null) {
+            val folderId = match.groupValues[1]
+            return ValidationResult.Valid(folderId to "https://drive.google.com/drive/folders/$folderId")
+        }
+        if (DRIVE_FOLDER_ID_REGEX.matches(trimmed)) {
+            return ValidationResult.Valid(trimmed to "https://drive.google.com/drive/folders/$trimmed")
+        }
+        return ValidationResult.Invalid("Paste a valid Google Drive folder link (https://drive.google.com/drive/folders/...).")
+    }
+
     /**
      * Masks internal stack traces, Firestore collection paths, and sensitive tokens in UI errors
      * while preserving actionable root-cause categories (e.g., App Check, Quota, Network).
@@ -127,9 +149,11 @@ object InputValidator {
             msg.contains("blocked", ignoreCase = true) ||
                 msg.contains("SAFETY", ignoreCase = true) ->
                 "Response was filtered for safety. Try rephrasing your study question."
+            msg.contains("timed out", ignoreCase = true) ||
+                msg.contains("timeout", ignoreCase = true) ->
+                "Connection timed out. Check internet speed or try a shorter prompt."
             msg.contains("network", ignoreCase = true) ||
                 msg.contains("Unable to resolve host", ignoreCase = true) ||
-                msg.contains("timeout", ignoreCase = true) ||
                 msg.contains("unavailable", ignoreCase = true) ->
                 "Network unavailable. Check your internet connection and retry."
             else -> fallback

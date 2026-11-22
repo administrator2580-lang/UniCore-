@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="course_cache" path="course_cache/" />
+    <files-path name="secure_uploads" path="secure_uploads/" />
+</paths>
