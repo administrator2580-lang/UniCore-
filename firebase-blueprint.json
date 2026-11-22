@@ -1,0 +1,218 @@
+{
+  "entities": {
+    "SuperAdminRecord": {
+      "title": "SuperAdminRecord",
+      "description": "Authorized Super Admin identity record stored in /super_admins/{userId}.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the Super Admin." },
+        "email": { "type": "string", "description": "Verified email address." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
+      },
+      "required": ["userId", "email", "createdAt", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Authorized Admin identity record stored in /admins/{userId}.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the Admin." },
+        "email": { "type": "string", "description": "Verified email address." },
+        "grantedBy": { "type": "string", "description": "UID of the Super Admin who granted access." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
+      },
+      "required": ["userId", "email", "grantedBy", "createdAt", "updatedAt"]
+    },
+    "SystemSettings": {
+      "title": "SystemSettings",
+      "description": "Global zero-cost quota caps and security toggles manageable only by Super Admin.",
+      "type": "object",
+      "properties": {
+        "dailyAiLimitPerUser": { "type": "integer", "description": "Max free-tier AI tutor calls per user per day." },
+        "dailyWriteLimitPerUser": { "type": "integer", "description": "Max Firestore writes per user per day." },
+        "maxFileUploadBytes": { "type": "integer", "description": "Max validated file size in bytes (<= 5MB)." },
+        "aiEnabled": { "type": "boolean", "description": "Global switch to pause AI features when approaching free-tier quota." },
+        "zeroCostLockActive": { "type": "boolean", "description": "Forces read-only safe mode if Spark free-tier limit is reached." },
+        "updatedBy": { "type": "string", "description": "Super Admin UID." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
+      },
+      "required": ["dailyAiLimitPerUser", "dailyWriteLimitPerUser", "maxFileUploadBytes", "aiEnabled", "zeroCostLockActive", "updatedBy", "createdAt", "updatedAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile without sensitive PII stored in /users/{userId}.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID." },
+        "displayName": { "type": "string", "description": "Sanitized display name." },
+        "role": { "type": "string", "enum": ["STUDENT", "ADMIN", "SUPER_ADMIN"], "description": "RBAC role." },
+        "aiCallsToday": { "type": "integer", "description": "Daily AI Logic usage counter." },
+        "writesToday": { "type": "integer", "description": "Daily Firestore write counter." },
+        "quotaDayKey": { "type": "string", "description": "UTC date string YYYY-MM-DD for quota reset." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
+      },
+      "required": ["userId", "displayName", "role", "aiCallsToday", "writesToday", "quotaDayKey", "createdAt", "updatedAt"]
+    },
+    "UserPrivatePii": {
+      "title": "UserPrivatePii",
+      "description": "Isolated PII record in /users/{userId}/private/{docId}.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "email", "createdAt", "updatedAt"]
+    },
+    "VerifiedFileRecord": {
+      "title": "VerifiedFileRecord",
+      "description": "Metadata for sandboxed, magic-byte-verified local file uploads.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "originalName": { "type": "string" },
+        "storedName": { "type": "string" },
+        "mimeType": { "type": "string", "enum": ["application/pdf", "image/png", "image/jpeg"] },
+        "sizeBytes": { "type": "integer" },
+        "sha256Hex": { "type": "string" },
+        "status": { "type": "string", "enum": ["VERIFIED"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "originalName", "storedName", "mimeType", "sizeBytes", "sha256Hex", "status", "createdAt", "updatedAt"]
+    },
+    "Course": {
+      "title": "Course",
+      "description": "Educational course with validated HTTPS study resource links.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "instructorId": { "type": "string" },
+        "instructorName": { "type": "string" },
+        "materialLink": { "type": "string" },
+        "materialType": { "type": "string", "enum": ["NOTES", "PDF_LINK", "ONEDRIVE_LINK"] },
+        "published": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "description", "instructorId", "instructorName", "materialType", "published", "createdAt", "updatedAt"]
+    },
+    "Quiz": {
+      "title": "Quiz",
+      "description": "Published quiz questions without answer keys.",
+      "type": "object",
+      "properties": {
+        "courseId": { "type": "string" },
+        "title": { "type": "string" },
+        "durationMinutes": { "type": "integer" },
+        "questionPrompts": { "type": "array" },
+        "optionBlocks": { "type": "array" },
+        "published": { "type": "boolean" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["courseId", "title", "durationMinutes", "questionPrompts", "optionBlocks", "published", "createdBy", "createdAt", "updatedAt"]
+    },
+    "QuizAnswerKey": {
+      "title": "QuizAnswerKey",
+      "description": "Protected answer key isolated in /quizzes/{quizId}/private/answer_key.",
+      "type": "object",
+      "properties": {
+        "quizId": { "type": "string" },
+        "correctIndices": { "type": "array" },
+        "passingScore": { "type": "integer" },
+        "updatedBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["quizId", "correctIndices", "passingScore", "updatedBy", "createdAt", "updatedAt"]
+    },
+    "QuizAttempt": {
+      "title": "QuizAttempt",
+      "description": "Student quiz submission; grades can only be finalized by Admin.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "quizId": { "type": "string" },
+        "quizTitle": { "type": "string" },
+        "selectedIndices": { "type": "array" },
+        "status": { "type": "string", "enum": ["SUBMITTED", "GRADED"] },
+        "score": { "type": "integer" },
+        "graded": { "type": "boolean" },
+        "gradedBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "studentName", "quizId", "quizTitle", "selectedIndices", "status", "score", "graded", "createdAt", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable security audit log entry.",
+      "type": "object",
+      "properties": {
+        "actorUid": { "type": "string" },
+        "actorLabel": { "type": "string" },
+        "action": { "type": "string" },
+        "severity": { "type": "string", "enum": ["INFO", "WARN", "HIGH", "CRITICAL"] },
+        "targetPath": { "type": "string" },
+        "details": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorUid", "actorLabel", "action", "severity", "targetPath", "details", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/super_admins/{userId}": {
+      "schema": { "$ref": "#/entities/SuperAdminRecord" },
+      "description": "Super Admin role registry."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Admin role registry managed by Super Admin."
+    },
+    "/system_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/SystemSettings" },
+      "description": "Global zero-cost limits and security toggles."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profile and daily quota counters."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivatePii" },
+      "description": "Split private PII subcollection."
+    },
+    "/users/{userId}/files/{fileId}": {
+      "schema": { "$ref": "#/entities/VerifiedFileRecord" },
+      "description": "Verified local sandbox file upload metadata."
+    },
+    "/courses/{courseId}": {
+      "schema": { "$ref": "#/entities/Course" },
+      "description": "Published and draft educational courses."
+    },
+    "/quizzes/{quizId}": {
+      "schema": { "$ref": "#/entities/Quiz" },
+      "description": "Quizzes without answer keys."
+    },
+    "/quizzes/{quizId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/QuizAnswerKey" },
+      "description": "Protected quiz answer keys accessible only to Admins."
+    },
+    "/quiz_attempts/{attemptId}": {
+      "schema": { "$ref": "#/entities/QuizAttempt" },
+      "description": "Student quiz attempts graded by Admins."
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Append-only immutable security audit logs."
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "UniCore",
+  "description": "Zero-Cost Secure Educational Platform with RBAC, Protected Quizzes, Immutable Audit Logs & AI Study Tutor",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

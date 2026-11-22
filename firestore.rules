@@ -1,0 +1,452 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Core Security Primitives ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isBootstrappedSuperAdmin() {
+      return isSignedIn() &&
+        ('email' in request.auth.token) &&
+        ('email_verified' in request.auth.token) &&
+        request.auth.token.email == 'fvathyvhmed@gmail.com' &&
+        request.auth.token.email_verified == true;
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn() && (
+        isBootstrappedSuperAdmin() ||
+        exists(/databases/$(database)/documents/super_admins/$(request.auth.uid))
+      );
+    }
+
+    function isAdmin() {
+      return isSuperAdmin() || (
+        isSignedIn() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isValidHttpsUrl(url) {
+      return url is string &&
+        url.size() >= 10 &&
+        url.size() <= 500 &&
+        url.matches('^https://[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}(/.*)?$');
+    }
+
+    // --- Entity Validation Helpers ---
+
+    function isValidRoleGrant(data) {
+      return data.userId is string && isValidId(data.userId) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 120 &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidAdminGrant(data) {
+      return isValidRoleGrant(data) &&
+        data.grantedBy is string && isValidId(data.grantedBy);
+    }
+
+    function isValidSystemSettings(data) {
+      return data.dailyAiLimitPerUser is int && data.dailyAiLimitPerUser >= 1 && data.dailyAiLimitPerUser <= 100 &&
+        data.dailyWriteLimitPerUser is int && data.dailyWriteLimitPerUser >= 10 && data.dailyWriteLimitPerUser <= 500 &&
+        data.maxFileUploadBytes is int && data.maxFileUploadBytes >= 102400 && data.maxFileUploadBytes <= 5242880 &&
+        data.aiEnabled is bool &&
+        data.zeroCostLockActive is bool &&
+        data.updatedBy is string && isValidId(data.updatedBy) &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidUserProfile(data) {
+      return data.userId is string && isValidId(data.userId) &&
+        data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 60 &&
+        data.role in ['STUDENT', 'ADMIN', 'SUPER_ADMIN'] &&
+        data.aiCallsToday is int && data.aiCallsToday >= 0 && data.aiCallsToday <= 1000 &&
+        data.writesToday is int && data.writesToday >= 0 && data.writesToday <= 5000 &&
+        data.quotaDayKey is string && data.quotaDayKey.size() >= 8 && data.quotaDayKey.size() <= 16 &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidUserPrivatePii(data) {
+      return data.userId is string && isValidId(data.userId) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 120 &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidFileRecord(data) {
+      return data.userId is string && isValidId(data.userId) &&
+        data.originalName is string && data.originalName.size() >= 1 && data.originalName.size() <= 120 &&
+        data.storedName is string && data.storedName.size() >= 5 && data.storedName.size() <= 100 &&
+        data.storedName.matches('^[a-zA-Z0-9_\\-]+\\.(pdf|png|jpg|jpeg)$') &&
+        data.mimeType in ['application/pdf', 'image/png', 'image/jpeg'] &&
+        data.sizeBytes is int && data.sizeBytes > 0 && data.sizeBytes <= 5242880 &&
+        data.sha256Hex is string && data.sha256Hex.size() == 64 &&
+        data.sha256Hex.matches('^[a-fA-F0-9]{64}$') &&
+        data.status == 'VERIFIED' &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidCourse(data) {
+      return data.title is string && data.title.size() >= 3 && data.title.size() <= 100 &&
+        data.description is string && data.description.size() >= 1 && data.description.size() <= 600 &&
+        data.instructorId is string && isValidId(data.instructorId) &&
+        data.instructorName is string && data.instructorName.size() >= 2 && data.instructorName.size() <= 60 &&
+        (!('materialLink' in data) || isValidHttpsUrl(data.materialLink)) &&
+        data.materialType in ['NOTES', 'PDF_LINK', 'ONEDRIVE_LINK'] &&
+        data.published is bool &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidQuiz(data) {
+      return data.courseId is string && isValidId(data.courseId) &&
+        data.title is string && data.title.size() >= 3 && data.title.size() <= 100 &&
+        data.durationMinutes is int && data.durationMinutes >= 1 && data.durationMinutes <= 180 &&
+        data.questionPrompts is list && data.questionPrompts.size() >= 1 && data.questionPrompts.size() <= 20 &&
+        data.questionPrompts[0] is string &&
+        data.optionBlocks is list && data.optionBlocks.size() == data.questionPrompts.size() &&
+        data.optionBlocks[0] is string &&
+        data.published is bool &&
+        data.createdBy is string && isValidId(data.createdBy) &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidAnswerKey(data) {
+      return data.quizId is string && isValidId(data.quizId) &&
+        data.correctIndices is list && data.correctIndices.size() >= 1 && data.correctIndices.size() <= 20 &&
+        data.correctIndices[0] is int &&
+        data.passingScore is int && data.passingScore >= 1 && data.passingScore <= 100 &&
+        data.updatedBy is string && isValidId(data.updatedBy) &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidQuizAttempt(data) {
+      return data.userId is string && isValidId(data.userId) &&
+        data.studentName is string && data.studentName.size() >= 2 && data.studentName.size() <= 60 &&
+        data.quizId is string && isValidId(data.quizId) &&
+        data.quizTitle is string && data.quizTitle.size() >= 1 && data.quizTitle.size() <= 100 &&
+        data.selectedIndices is list && data.selectedIndices.size() >= 1 && data.selectedIndices.size() <= 20 &&
+        data.selectedIndices[0] is int &&
+        data.status in ['SUBMITTED', 'GRADED'] &&
+        data.score is int && data.score >= 0 && data.score <= 100 &&
+        data.graded is bool &&
+        (!('gradedBy' in data) || (data.gradedBy is string && isValidId(data.gradedBy))) &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidAuditLog(data) {
+      return data.actorUid is string && isValidId(data.actorUid) &&
+        data.actorLabel is string && data.actorLabel.size() >= 2 && data.actorLabel.size() <= 80 &&
+        data.action in [
+          'AUTH_SUCCESS',
+          'AUTH_FAILURE',
+          'UNAUTHORIZED_ADMIN_ATTEMPT',
+          'ROLE_CHANGED',
+          'SETTINGS_CHANGED',
+          'QUIZ_SUBMITTED',
+          'GRADE_FINALIZED',
+          'FILE_UPLOAD_VERIFIED',
+          'FILE_UPLOAD_REJECTED',
+          'RATE_LIMIT_TRIGGERED',
+          'QUOTA_WARNING',
+          'QUOTA_LOCKED'
+        ] &&
+        data.severity in ['INFO', 'WARN', 'HIGH', 'CRITICAL'] &&
+        data.targetPath is string && data.targetPath.size() >= 1 && data.targetPath.size() <= 180 &&
+        data.details is string && data.details.size() >= 1 && data.details.size() <= 400 &&
+        isValidTimestamp(data.createdAt);
+    }
+
+    // --- Collection Rules ---
+
+    match /super_admins/{userId} {
+      allow get: if isValidId(userId) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isSuperAdmin() &&
+        isValidId(userId) &&
+        incoming().userId == userId &&
+        incoming().keys().hasAll(['userId', 'email', 'createdAt', 'updatedAt']) &&
+        incoming().keys().hasOnly(['userId', 'email', 'createdAt', 'updatedAt']) &&
+        isValidRoleGrant(incoming());
+      allow update: if false;
+      allow delete: if isValidId(userId) && isSuperAdmin() && userId != request.auth.uid;
+    }
+
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isSuperAdmin() &&
+        isValidId(userId) &&
+        incoming().userId == userId &&
+        incoming().grantedBy == request.auth.uid &&
+        incoming().keys().hasAll(['userId', 'email', 'grantedBy', 'createdAt', 'updatedAt']) &&
+        incoming().keys().hasOnly(['userId', 'email', 'grantedBy', 'createdAt', 'updatedAt']) &&
+        isValidAdminGrant(incoming());
+      allow update: if false;
+      allow delete: if isValidId(userId) && isSuperAdmin();
+    }
+
+    match /system_settings/{settingId} {
+      allow get: if isSignedIn() && isValidId(settingId);
+      allow list: if isSuperAdmin();
+      allow create: if isSuperAdmin() &&
+        isValidId(settingId) &&
+        incoming().updatedBy == request.auth.uid &&
+        incoming().keys().hasAll([
+          'dailyAiLimitPerUser', 'dailyWriteLimitPerUser', 'maxFileUploadBytes',
+          'aiEnabled', 'zeroCostLockActive', 'updatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'dailyAiLimitPerUser', 'dailyWriteLimitPerUser', 'maxFileUploadBytes',
+          'aiEnabled', 'zeroCostLockActive', 'updatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidSystemSettings(incoming());
+      allow update: if isSuperAdmin() &&
+        isValidId(settingId) &&
+        isValidSystemSettings(incoming()) &&
+        incoming().updatedBy == request.auth.uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'dailyAiLimitPerUser', 'dailyWriteLimitPerUser', 'maxFileUploadBytes',
+          'aiEnabled', 'zeroCostLockActive', 'updatedBy', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() &&
+        isValidId(userId) &&
+        isOwner(userId) &&
+        incoming().userId == request.auth.uid &&
+        (incoming().role == 'STUDENT' || (incoming().role == 'SUPER_ADMIN' && isBootstrappedSuperAdmin())) &&
+        incoming().aiCallsToday == 0 &&
+        incoming().writesToday == 0 &&
+        incoming().keys().hasAll([
+          'userId', 'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'userId', 'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidUserProfile(incoming());
+      allow update: if isSignedIn() &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt && (
+          (
+            isOwner(userId) &&
+            incoming().role == existing().role &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'updatedAt'
+            ])
+          ) || (
+            isSuperAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(userId) && isSuperAdmin() && userId != request.auth.uid;
+
+      match /private/{docId} {
+        allow get: if isValidId(userId) && isValidId(docId) && (isOwner(userId) || isSuperAdmin());
+        allow list: if isValidId(userId) && (isOwner(userId) || isSuperAdmin());
+        allow create: if isSignedIn() &&
+          isValidId(userId) &&
+          isValidId(docId) &&
+          isOwner(userId) &&
+          incoming().userId == request.auth.uid &&
+          incoming().keys().hasAll(['userId', 'email', 'createdAt', 'updatedAt']) &&
+          incoming().keys().hasOnly(['userId', 'email', 'createdAt', 'updatedAt']) &&
+          isValidUserPrivatePii(incoming());
+        allow update: if isSignedIn() &&
+          isValidId(userId) &&
+          isValidId(docId) &&
+          isOwner(userId) &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          isValidUserPrivatePii(incoming()) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(docId) && isSuperAdmin();
+      }
+
+      match /files/{fileId} {
+        allow get: if isValidId(userId) && isValidId(fileId) && (isOwner(userId) || isAdmin());
+        allow list: if isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow create: if isSignedIn() &&
+          isValidId(userId) &&
+          isValidId(fileId) &&
+          isOwner(userId) &&
+          incoming().userId == request.auth.uid &&
+          incoming().keys().hasAll([
+            'userId', 'originalName', 'storedName', 'mimeType', 'sizeBytes', 'sha256Hex', 'status', 'createdAt', 'updatedAt'
+          ]) &&
+          incoming().keys().hasOnly([
+            'userId', 'originalName', 'storedName', 'mimeType', 'sizeBytes', 'sha256Hex', 'status', 'createdAt', 'updatedAt'
+          ]) &&
+          isValidFileRecord(incoming());
+        allow update: if false;
+        allow delete: if isValidId(userId) && isValidId(fileId) && (isOwner(userId) || isAdmin());
+      }
+    }
+
+    match /courses/{courseId} {
+      allow get: if isSignedIn() && isValidId(courseId) && (existing().published == true || isAdmin());
+      allow list: if isSignedIn() && (resource.data.published == true || isAdmin());
+      allow create: if isAdmin() &&
+        isValidId(courseId) &&
+        incoming().instructorId == request.auth.uid &&
+        incoming().keys().hasAll([
+          'title', 'description', 'instructorId', 'instructorName', 'materialType', 'published', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'title', 'description', 'instructorId', 'instructorName', 'materialLink', 'materialType', 'published', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidCourse(incoming());
+      allow update: if isAdmin() &&
+        isValidId(courseId) &&
+        isValidCourse(incoming()) &&
+        incoming().instructorId == existing().instructorId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'description', 'instructorName', 'materialLink', 'materialType', 'published', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(courseId);
+    }
+
+    match /quizzes/{quizId} {
+      allow get: if isSignedIn() && isValidId(quizId) && (existing().published == true || isAdmin());
+      allow list: if isSignedIn() && (resource.data.published == true || isAdmin());
+      allow create: if isAdmin() &&
+        isValidId(quizId) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().keys().hasAll([
+          'courseId', 'title', 'durationMinutes', 'questionPrompts', 'optionBlocks', 'published', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'courseId', 'title', 'durationMinutes', 'questionPrompts', 'optionBlocks', 'published', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidQuiz(incoming()) &&
+        exists(/databases/$(database)/documents/courses/$(incoming().courseId));
+      allow update: if isAdmin() &&
+        isValidId(quizId) &&
+        isValidQuiz(incoming()) &&
+        incoming().courseId == existing().courseId &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'durationMinutes', 'questionPrompts', 'optionBlocks', 'published', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(quizId);
+
+      // Split Collection: Protected Answer Key accessible ONLY to Admins/SuperAdmins
+      match /private/{docId} {
+        allow get, list: if isValidId(quizId) && isAdmin();
+        allow create: if isAdmin() &&
+          isValidId(quizId) &&
+          docId == 'answer_key' &&
+          incoming().quizId == quizId &&
+          incoming().updatedBy == request.auth.uid &&
+          incoming().keys().hasAll(['quizId', 'correctIndices', 'passingScore', 'updatedBy', 'createdAt', 'updatedAt']) &&
+          incoming().keys().hasOnly(['quizId', 'correctIndices', 'passingScore', 'updatedBy', 'createdAt', 'updatedAt']) &&
+          isValidAnswerKey(incoming()) &&
+          exists(/databases/$(database)/documents/quizzes/$(quizId));
+        allow update: if isAdmin() &&
+          isValidId(quizId) &&
+          docId == 'answer_key' &&
+          isValidAnswerKey(incoming()) &&
+          incoming().quizId == existing().quizId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedBy == request.auth.uid &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['correctIndices', 'passingScore', 'updatedBy', 'updatedAt']);
+        allow delete: if isAdmin() && isValidId(quizId);
+      }
+    }
+
+    match /quiz_attempts/{attemptId} {
+      allow get: if isSignedIn() && isValidId(attemptId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() &&
+        isValidId(attemptId) &&
+        attemptId == (request.auth.uid + '_' + incoming().quizId) &&
+        incoming().userId == request.auth.uid &&
+        incoming().status == 'SUBMITTED' &&
+        incoming().score == 0 &&
+        incoming().graded == false &&
+        !('gradedBy' in incoming()) &&
+        incoming().keys().hasAll([
+          'userId', 'studentName', 'quizId', 'quizTitle', 'selectedIndices', 'status', 'score', 'graded', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'userId', 'studentName', 'quizId', 'quizTitle', 'selectedIndices', 'status', 'score', 'graded', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidQuizAttempt(incoming()) &&
+        exists(/databases/$(database)/documents/quizzes/$(incoming().quizId));
+      allow update: if isAdmin() &&
+        isValidId(attemptId) &&
+        isValidQuizAttempt(incoming()) &&
+        (existing().status != 'GRADED' || isSuperAdmin()) &&
+        incoming().status == 'GRADED' &&
+        incoming().graded == true &&
+        incoming().gradedBy == request.auth.uid &&
+        incoming().userId == existing().userId &&
+        incoming().quizId == existing().quizId &&
+        incoming().selectedIndices == existing().selectedIndices &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['score', 'graded', 'status', 'gradedBy', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /audit_logs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isSignedIn() &&
+        isValidId(logId) &&
+        incoming().actorUid == request.auth.uid &&
+        incoming().keys().hasAll([
+          'actorUid', 'actorLabel', 'action', 'severity', 'targetPath', 'details', 'createdAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'actorUid', 'actorLabel', 'action', 'severity', 'targetPath', 'details', 'createdAt'
+        ]) &&
+        isValidAuditLog(incoming());
+      allow update, delete: if false;
+    }
+  }
+}

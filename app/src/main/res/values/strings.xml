@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">UniCore</string>
+    <string name="tagline">Zero-Cost Secure Educational Platform</string>
+    <string name="sign_in_google">Sign in with Google</string>
+    <string name="sign_out">Sign out</string>
+    <string name="nav_courses">Courses</string>
+    <string name="nav_quizzes">Quizzes</string>
+    <string name="nav_tutor">AI Tutor</string>
+    <string name="nav_vault">Files</string>
+    <string name="nav_security">Security</string>
+</resources>
