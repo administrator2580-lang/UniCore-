@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build-apk:
-    name: Build Debug APK (Zero-Cost CI)
+    name: Build UniCore APKs (Zero-Cost CI)
     runs-on: ubuntu-latest
 
     steps:
@@ -58,6 +58,7 @@ jobs:
                 -dname "CN=Android Debug,O=Android,C=US"
             fi
           fi
+          echo "Debug APK SHA fingerprints:"
           keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -E "SHA1:|SHA256:" || true
 
       - name: Set up Gradle 9.3.1
@@ -78,3 +79,48 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Check release signing secrets
+        id: release_check
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping Release APK build. Add RELEASE_KEYSTORE_BASE64, STORE_PASSWORD, and KEY_PASSWORD secrets (alias: upload) to build signed Release APKs."
+          fi
+
+      - name: Prepare release keystore and print SHA fingerprints
+        if: steps.release_check.outputs.enabled == 'true'
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: |
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > "${{ github.workspace }}/my-upload-key.jks"
+          echo "Release APK SHA fingerprints (add SHA1 to Firebase Project Settings if using Google Sign-In on Release):"
+          keytool -list -v -keystore "${{ github.workspace }}/my-upload-key.jks" -storepass "$STORE_PASSWORD" -alias upload | grep -E "SHA1:|SHA256:" || true
+
+      - name: Build Signed Release APK
+        if: steps.release_check.outputs.enabled == 'true'
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle :app:assembleRelease
+
+      - name: Upload UniCore Release APK
+        if: steps.release_check.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: UniCore-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Clean up sensitive keystores
+        if: always()
+        run: rm -f "${{ github.workspace }}/my-upload-key.jks"
