@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  build-apk:
-    name: Build UniCore APKs (Zero-Cost CI)
+  build-debug:
+    name: Build Debug APK (Zero-Cost CI)
     runs-on: ubuntu-latest
 
     steps:
@@ -80,6 +80,27 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-release:
+    name: Build Signed Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure google-services.json from GitHub Secret
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ ! -f app/google-services.json ]; then
+            if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+              printf '%s\n' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+            else
+              echo "::error::Missing GOOGLE_SERVICES_JSON secret."
+              exit 1
+            fi
+          fi
+
       - name: Check release signing secrets
         id: release_check
         env:
@@ -91,18 +112,43 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping Release APK build. Add RELEASE_KEYSTORE_BASE64, STORE_PASSWORD, and KEY_PASSWORD secrets (alias: upload) to build signed Release APKs."
+            echo "::notice::Release signing secrets not set. Skipping Release APK build."
           fi
 
-      - name: Prepare release keystore and print SHA fingerprints
+      - name: Set up JDK 21
+        if: steps.release_check.outputs.enabled == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Accept Android SDK licenses
+        if: steps.release_check.outputs.enabled == 'true'
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ -n "$SDK_ROOT" ] && [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          fi
+
+      - name: Prepare release keystore and verify alias
         if: steps.release_check.outputs.enabled == 'true'
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
-          printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > "${{ github.workspace }}/my-upload-key.jks"
-          echo "Release APK SHA fingerprints (add SHA1 to Firebase Project Settings if using Google Sign-In on Release):"
-          keytool -list -v -keystore "${{ github.workspace }}/my-upload-key.jks" -storepass "$STORE_PASSWORD" -alias upload | grep -E "SHA1:|SHA256:" || true
+          CLEAN_B64="$(printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n\t ')"
+          if ! printf '%s' "$CLEAN_B64" | base64 -d > "${{ github.workspace }}/my-upload-key.jks"; then
+            echo "::error::RELEASE_KEYSTORE_BASE64 is not valid Base64. Re-copy only the Base64 file contents (no extra labels or spaces) or delete the secret if you only need the Debug APK."
+            exit 1
+          fi
+          echo "Release APK SHA fingerprints (add SHA1 in Firebase Project Settings for Google Sign-In):"
+          keytool -list -v -keystore "${{ github.workspace }}/my-upload-key.jks" -storepass "$STORE_PASSWORD" -alias upload | grep -E "SHA1:|SHA256:"
+
+      - name: Set up Gradle 9.3.1
+        if: steps.release_check.outputs.enabled == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
 
       - name: Build Signed Release APK
         if: steps.release_check.outputs.enabled == 'true'
