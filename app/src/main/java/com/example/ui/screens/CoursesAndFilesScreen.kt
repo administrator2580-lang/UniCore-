@@ -2,9 +2,12 @@ package com.example.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -12,18 +15,20 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.School
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -31,8 +36,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -48,6 +53,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.model.Course
@@ -55,34 +61,71 @@ import com.example.data.model.MaterialType
 import com.example.data.model.UserRole
 import com.example.data.model.VerifiedFileRecord
 import com.example.security.InputValidator
+import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.viewmodel.UiState
 
 @Composable
 fun CoursesScreen(
     coursesState: UiState<List<Course>>,
     userRole: UserRole,
-    onCreateCourse: (String, String, String, MaterialType) -> Unit
+    onCreateCourse: (String, String, String, MaterialType) -> Unit,
+    onDeleteCourse: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val strings = LocalAppStrings.current
     var showCreateDialog by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFilter by remember { mutableStateOf<MaterialType?>(null) }
 
-    Column(
-        modifier = Modifier.fillMaxSize()
-    ) {
-        if (userRole != UserRole.STUDENT) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Search + Filter + Optional Admin Publish Header
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.End
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Button(
-                    onClick = { showCreateDialog = true },
-                    modifier = Modifier.testTag("add_course_button")
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.size(6.dp))
-                    Text("Publish Course")
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    placeholder = { Text(strings.searchCoursesHint) },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.weight(1f)
+                )
+                if (userRole != UserRole.STUDENT) {
+                    Button(
+                        onClick = { showCreateDialog = true },
+                        modifier = Modifier.testTag("add_course_button")
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(4.dp))
+                        Text(strings.publishCourse)
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = selectedFilter == null,
+                    onClick = { selectedFilter = null },
+                    label = { Text(strings.allTypes) }
+                )
+                MaterialType.entries.forEach { type ->
+                    FilterChip(
+                        selected = selectedFilter == type,
+                        onClick = { selectedFilter = if (selectedFilter == type) null else type },
+                        label = { Text(type.name.replace("_", " ")) }
+                    )
                 }
             }
         }
@@ -101,14 +144,24 @@ fun CoursesScreen(
                 ErrorBannerCard(coursesState.message)
             }
             is UiState.Success -> {
-                if (coursesState.data.isEmpty()) {
+                val filteredCourses = remember(coursesState.data, searchQuery, selectedFilter) {
+                    coursesState.data.filter { course ->
+                        val matchesFilter = selectedFilter == null || course.materialType == selectedFilter?.name
+                        val matchesQuery = searchQuery.isBlank() ||
+                            course.title.contains(searchQuery.trim(), ignoreCase = true) ||
+                            course.description.contains(searchQuery.trim(), ignoreCase = true)
+                        matchesFilter && matchesQuery
+                    }
+                }
+
+                if (filteredCourses.isEmpty()) {
                     EmptyStateCard(
                         icon = Icons.Default.School,
-                        title = "No Published Courses Yet",
+                        title = strings.noCoursesTitle,
                         subtitle = if (userRole == UserRole.STUDENT) {
-                            "Courses published by verified Admins will appear here."
+                            strings.noCoursesStudentSub
                         } else {
-                            "Tap 'Publish Course' to create a course with HTTPS or OneDrive study links."
+                            strings.noCoursesAdminSub
                         }
                     )
                 } else {
@@ -116,14 +169,19 @@ fun CoursesScreen(
                         contentPadding = PaddingValues(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        items(coursesState.data, key = { it.id }) { course ->
+                        items(filteredCourses, key = { it.id }) { course ->
                             CourseCard(
                                 course = course,
+                                canManage = userRole != UserRole.STUDENT,
+                                onDelete = { onDeleteCourse(course.id) },
                                 onOpenLink = { url ->
                                     val valid = InputValidator.validateOptionalHttpsUrl(url)
                                     if (valid is InputValidator.ValidationResult.Valid && valid.value != null) {
-                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(valid.value))
-                                        context.startActivity(intent)
+                                        runCatching {
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(valid.value)))
+                                        }.onFailure {
+                                            Toast.makeText(context, "No browser app found to open link.", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
                             )
@@ -148,17 +206,21 @@ fun CoursesScreen(
 @Composable
 private fun CourseCard(
     course: Course,
+    canManage: Boolean,
+    onDelete: () -> Unit,
     onOpenLink: (String) -> Unit
 ) {
+    val strings = LocalAppStrings.current
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("course_card_${course.id}"),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -176,13 +238,29 @@ private fun CourseCard(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
-                Text(
-                    text = "By ${course.instructorName}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "${strings.byInstructor} ${course.instructorName}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (canManage) {
+                        IconButton(onClick = onDelete) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = strings.deleteLabel,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
             }
-            Text(text = course.title, style = MaterialTheme.typography.titleLarge)
+            Text(
+                text = course.title,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold
+            )
             Text(
                 text = course.description,
                 style = MaterialTheme.typography.bodyMedium,
@@ -195,11 +273,11 @@ private fun CourseCard(
                 ) {
                     Icon(
                         Icons.AutoMirrored.Filled.OpenInNew,
-                        contentDescription = "Open HTTPS study material",
+                        contentDescription = strings.openResource,
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(Modifier.size(8.dp))
-                    Text("Open Verified HTTPS Resource", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(strings.openResource, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
@@ -211,6 +289,7 @@ private fun CreateCourseDialog(
     onDismiss: () -> Unit,
     onConfirm: (String, String, String, MaterialType) -> Unit
 ) {
+    val strings = LocalAppStrings.current
     var title by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
     var link by remember { mutableStateOf("") }
@@ -218,32 +297,35 @@ private fun CreateCourseDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Publish Verified Course") },
+        title = { Text(strings.publishCourse) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("Course Title (3–100 chars)") },
+                    label = { Text(strings.courseTitleLabel) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("course_title_input")
                 )
                 OutlinedTextField(
                     value = description,
                     onValueChange = { description = it },
-                    label = { Text("Description") },
+                    label = { Text(strings.courseDescLabel) },
                     minLines = 2,
                     modifier = Modifier.fillMaxWidth().testTag("course_desc_input")
                 )
                 OutlinedTextField(
                     value = link,
                     onValueChange = { link = it },
-                    label = { Text("Optional HTTPS / OneDrive URL") },
+                    label = { Text(strings.courseLinkLabel) },
                     placeholder = { Text("https://onedrive.live.com/...") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("course_link_input")
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     MaterialType.entries.forEach { type ->
                         FilterChip(
                             selected = selectedType == type,
@@ -259,11 +341,11 @@ private fun CreateCourseDialog(
                 onClick = { onConfirm(title, description, link, selectedType) },
                 modifier = Modifier.testTag("confirm_create_course")
             ) {
-                Text("Publish")
+                Text(strings.publishAction)
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(strings.cancelAction) }
         }
     )
 }
@@ -273,6 +355,7 @@ fun SecureFilesVaultScreen(
     filesState: UiState<List<VerifiedFileRecord>>,
     onFilePicked: (Uri) -> Unit
 ) {
+    val strings = LocalAppStrings.current
     val pdfPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -293,19 +376,21 @@ fun SecureFilesVaultScreen(
     ) {
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "Zero-Permission Sandboxed File Vault",
+                    text = strings.filesVaultTitle,
                     style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSecondaryContainer
                 )
                 Text(
-                    text = "Files are selected via Android Photo Picker / SAF (no broad storage permission), inspected for PDF/PNG/JPEG magic bytes, capped at 5 MB, SHA-256 hashed, and renamed with a random UUID in app-private storage.",
+                    text = strings.filesVaultSub,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSecondaryContainer
                 )
@@ -316,7 +401,7 @@ fun SecureFilesVaultScreen(
                     ) {
                         Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.size(6.dp))
-                        Text("Verify PDF")
+                        Text(strings.verifyPdf)
                     }
                     OutlinedButton(
                         onClick = {
@@ -328,7 +413,7 @@ fun SecureFilesVaultScreen(
                     ) {
                         Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.size(6.dp))
-                        Text("Verify Image")
+                        Text(strings.verifyImage)
                     }
                 }
             }
@@ -341,15 +426,16 @@ fun SecureFilesVaultScreen(
                 if (filesState.data.isEmpty()) {
                     EmptyStateCard(
                         icon = Icons.Default.AttachFile,
-                        title = "No Verified Files",
-                        subtitle = "Select a PDF or image above to run magic-byte validation and store its integrity record."
+                        title = strings.noFilesTitle,
+                        subtitle = strings.noFilesSub
                     )
                 } else {
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         items(filesState.data, key = { it.id }) { file ->
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                             ) {
                                 Column(
                                     modifier = Modifier.padding(14.dp),
@@ -361,7 +447,7 @@ fun SecureFilesVaultScreen(
                                     ) {
                                         Icon(
                                             Icons.Default.Verified,
-                                            contentDescription = "Verified file",
+                                            contentDescription = file.originalName,
                                             tint = MaterialTheme.colorScheme.secondary,
                                             modifier = Modifier.size(18.dp)
                                         )
@@ -373,14 +459,9 @@ fun SecureFilesVaultScreen(
                                         )
                                     }
                                     Text(
-                                        text = "${file.mimeType} • ${file.sizeBytes / 1024} KB • UUID: ${file.storedName}",
+                                        text = "${file.mimeType} • ${(file.sizeBytes / 1024).coerceAtLeast(1)} KB",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Text(
-                                        text = "SHA-256: ${file.sha256Hex.take(24)}...",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary
                                     )
                                 }
                             }
@@ -404,7 +485,7 @@ fun ErrorBannerCard(message: String) {
         Text(
             text = message,
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onError,
+            color = MaterialTheme.colorScheme.onErrorContainer,
             modifier = Modifier.padding(16.dp)
         )
     }
@@ -420,7 +501,8 @@ fun EmptyStateCard(
         modifier = Modifier
             .fillMaxWidth()
             .padding(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(
             modifier = Modifier
@@ -435,7 +517,7 @@ fun EmptyStateCard(
                 tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(40.dp)
             )
-            Text(text = title, style = MaterialTheme.typography.titleMedium)
+            Text(text = title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodyMedium,

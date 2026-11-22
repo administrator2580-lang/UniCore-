@@ -167,6 +167,38 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["actorUid", "actorLabel", "action", "severity", "targetPath", "details", "createdAt"]
+    },
+    "RoleInvite": {
+      "title": "RoleInvite",
+      "description": "Email-based Student/Admin account pre-registration and role invite stored in /role_invites/{emailKey}.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayNameHint": { "type": "string" },
+        "assignedRole": { "type": "string", "enum": ["STUDENT", "ADMIN"] },
+        "invitedBy": { "type": "string" },
+        "invitedByLabel": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING", "CLAIMED"] },
+        "claimedByUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "displayNameHint", "assignedRole", "invitedBy", "invitedByLabel", "status", "createdAt", "updatedAt"]
+    },
+    "UniNotification": {
+      "title": "UniNotification",
+      "description": "Zero-cost broadcast or user-targeted notification stored in /notifications/{notificationId}.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "category": { "type": "string", "enum": ["COURSE", "QUIZ", "GRADE", "ROLE", "SECURITY", "ANNOUNCEMENT"] },
+        "targetUid": { "type": "string" },
+        "senderUid": { "type": "string" },
+        "senderName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "body", "category", "targetUid", "senderUid", "senderName", "createdAt"]
     }
   },
   "firestore": {
@@ -213,6 +245,14 @@
     "/audit_logs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
       "description": "Append-only immutable security audit logs."
+    },
+    "/role_invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/RoleInvite" },
+      "description": "Email-keyed Student and Admin pre-registrations."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/UniNotification" },
+      "description": "Broadcast and per-user platform notifications."
     }
   }
 }

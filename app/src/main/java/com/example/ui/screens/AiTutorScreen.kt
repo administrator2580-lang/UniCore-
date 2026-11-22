@@ -1,7 +1,9 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,12 +19,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.PauseCircle
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -39,19 +45,25 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.security.ZeroCostQuotaManager
+import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.viewmodel.AiUiState
 
 @Composable
 fun AiTutorScreen(
     aiState: AiUiState,
     quotaSnapshot: ZeroCostQuotaManager.QuotaSnapshot,
-    onAskTutor: (String) -> Unit
+    onAskTutor: (String) -> Unit,
+    onClearTutor: () -> Unit
 ) {
+    val strings = LocalAppStrings.current
+    val clipboard = LocalClipboardManager.current
     var prompt by remember { mutableStateOf("") }
 
     Column(
@@ -64,30 +76,30 @@ fun AiTutorScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(140.dp)
+                .height(132.dp)
                 .clip(MaterialTheme.shapes.large)
         ) {
             Image(
                 painter = painterResource(id = R.drawable.img_ai_tutor_banner),
-                contentDescription = "UniCore Zero-Cost AI Tutor Banner",
+                contentDescription = strings.tutorBannerTitle,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
             )
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC0B1120))))
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC090E1A))))
                     .padding(16.dp),
                 contentAlignment = Alignment.BottomStart
             ) {
                 Column {
                     Text(
-                        text = "Gemini 3.8 Flash • Free Tier",
+                        text = strings.tutorBannerSubtitle,
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.secondary
                     )
                     Text(
-                        text = "UniCore Study Tutor",
+                        text = strings.tutorBannerTitle,
                         style = MaterialTheme.typography.headlineMedium,
                         color = Color.White
                     )
@@ -95,10 +107,10 @@ fun AiTutorScreen(
             }
         }
 
-        // Zero-Cost Quota Guard Card
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
             Column(
                 modifier = Modifier.padding(14.dp),
@@ -108,7 +120,7 @@ fun AiTutorScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Daily Free-Tier AI Quota", style = MaterialTheme.typography.titleMedium)
+                    Text(strings.dailyAiQuota, style = MaterialTheme.typography.titleMedium)
                     Text(
                         text = "${quotaSnapshot.aiUsedToday} / ${quotaSnapshot.aiDailyCap}",
                         style = MaterialTheme.typography.labelMedium,
@@ -128,17 +140,17 @@ fun AiTutorScreen(
                         ZeroCostQuotaManager.QuotaHealth.PAUSED_LIMIT_REACHED -> MaterialTheme.colorScheme.error
                     }
                 )
-                Text(
-                    text = when (quotaSnapshot.aiHealth) {
-                        ZeroCostQuotaManager.QuotaHealth.HEALTHY ->
-                            "App Check attested • No billing required on Spark Plan."
-                        ZeroCostQuotaManager.QuotaHealth.WARNING_80_PERCENT ->
-                            "Warning: Approaching 80% of daily free-tier cap."
-                        ZeroCostQuotaManager.QuotaHealth.PAUSED_LIMIT_REACHED ->
-                            "Paused safely: Free-tier cap reached or locked by Super Admin."
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            }
+        }
+
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            listOf(strings.quickPrompt1, strings.quickPrompt2, strings.quickPrompt3).forEach { chipPrompt ->
+                AssistChip(
+                    onClick = { prompt = chipPrompt },
+                    label = { Text(chipPrompt) }
                 )
             }
         }
@@ -146,9 +158,19 @@ fun AiTutorScreen(
         OutlinedTextField(
             value = prompt,
             onValueChange = { prompt = it },
-            label = { Text("Ask a course question (max 600 chars)") },
-            placeholder = { Text("Explain how Firestore Security Rules prevent privilege escalation...") },
+            label = { Text(strings.askPromptLabel) },
+            placeholder = { Text(strings.askPromptPlaceholder) },
             minLines = 3,
+            trailingIcon = {
+                if (prompt.isNotEmpty()) {
+                    IconButton(onClick = {
+                        prompt = ""
+                        onClearTutor()
+                    }) {
+                        Icon(Icons.Default.Clear, contentDescription = strings.clearLabel)
+                    }
+                }
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("ai_prompt_input")
@@ -172,7 +194,7 @@ fun AiTutorScreen(
             } else {
                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.size(8.dp))
-                Text("Ask Zero-Cost Tutor")
+                Text(strings.askTutorButton)
             }
         }
 
@@ -180,17 +202,18 @@ fun AiTutorScreen(
             is AiUiState.Idle -> {
                 EmptyStateCard(
                     icon = Icons.Default.AutoAwesome,
-                    title = "Ready to Help",
-                    subtitle = "All requests are authenticated via App Check and sanitized before inference."
+                    title = strings.tutorIdleTitle,
+                    subtitle = strings.tutorIdleSub
                 )
             }
             is AiUiState.Loading -> {
-                Text("Connecting via App Check...", style = MaterialTheme.typography.bodyMedium)
+                Text(strings.tutorConnecting, style = MaterialTheme.typography.bodyMedium)
             }
             is AiUiState.Streaming -> {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                 ) {
                     Text(
                         text = aiState.text,
@@ -202,13 +225,23 @@ fun AiTutorScreen(
             is AiUiState.Success -> {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
                 ) {
-                    Text(
-                        text = aiState.text,
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.padding(16.dp)
-                    )
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            IconButton(onClick = { clipboard.setText(AnnotatedString(aiState.text)) }) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = strings.copyAnswer)
+                            }
+                        }
+                        Text(
+                            text = aiState.text,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
                 }
             }
             is AiUiState.PausedQuota -> {
@@ -222,7 +255,7 @@ fun AiTutorScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.PauseCircle, contentDescription = "Paused")
+                        Icon(Icons.Default.PauseCircle, contentDescription = null)
                         Text(text = aiState.reason, style = MaterialTheme.typography.bodyMedium)
                     }
                 }

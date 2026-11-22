@@ -168,3 +168,58 @@ data class AuditLog(
     val details: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null
 )
+
+enum class InviteStatus {
+    PENDING,
+    CLAIMED;
+
+    companion object {
+        fun fromRaw(raw: String?): InviteStatus {
+            return entries.firstOrNull { it.name == raw } ?: PENDING
+        }
+    }
+}
+
+enum class NotificationCategory {
+    COURSE,
+    QUIZ,
+    GRADE,
+    ROLE,
+    SECURITY,
+    ANNOUNCEMENT;
+
+    companion object {
+        fun fromRaw(raw: String?): NotificationCategory {
+            return entries.firstOrNull { it.name == raw } ?: ANNOUNCEMENT
+        }
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class RoleInvite(
+    @DocumentId val id: String = "",
+    val email: String = "",
+    val displayNameHint: String = "",
+    val assignedRole: String = UserRole.STUDENT.name,
+    val invitedBy: String = "",
+    val invitedByLabel: String = "",
+    val status: String = InviteStatus.PENDING.name,
+    val claimedByUid: String? = null,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class UniNotification(
+    @DocumentId val id: String = "",
+    val title: String = "",
+    val body: String = "",
+    val category: String = NotificationCategory.ANNOUNCEMENT.name,
+    val targetUid: String = "ALL",
+    val senderUid: String = "",
+    val senderName: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null
+)
+

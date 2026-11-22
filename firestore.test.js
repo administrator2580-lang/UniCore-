@@ -596,3 +596,141 @@ test("10. Super Admin manages settings & roles; duplicate quiz attempt & future 
     })
   );
 });
+
+test("11. Role invites RBAC: Admin can invite students only; SuperAdmin can invite admins and users claim safely", async () => {
+  await seedRolesAndBaseData();
+  const superDb = testEnv
+    .authenticatedContext(SUPER_ADMIN_UID, { email: BOOTSTRAP_EMAIL, email_verified: true })
+    .firestore();
+  const adminDb = testEnv
+    .authenticatedContext(ADMIN_UID, { email: "admin@unicore.edu", email_verified: true })
+    .firestore();
+  const aliceDb = testEnv
+    .authenticatedContext(STUDENT_A, { email: "alice@unicore.edu", email_verified: true })
+    .firestore();
+
+  // Admin CAN invite a Student
+  await assertSucceeds(
+    adminDb.collection("role_invites").doc("new_student@unicore.edu").set({
+      email: "new_student@unicore.edu",
+      displayNameHint: "New Student",
+      assignedRole: "STUDENT",
+      invitedBy: ADMIN_UID,
+      invitedByLabel: "Dr. Carol",
+      status: "PENDING",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Regular Admin CANNOT invite an ADMIN
+  await assertFails(
+    adminDb.collection("role_invites").doc("sneaky_admin@unicore.edu").set({
+      email: "sneaky_admin@unicore.edu",
+      displayNameHint: "Sneaky Admin",
+      assignedRole: "ADMIN",
+      invitedBy: ADMIN_UID,
+      invitedByLabel: "Dr. Carol",
+      status: "PENDING",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Student CANNOT read/list invites or create invites
+  await assertFails(aliceDb.collection("role_invites").get());
+  await assertFails(aliceDb.collection("role_invites").doc("new_student@unicore.edu").get());
+
+  // Super Admin CAN invite an ADMIN
+  await assertSucceeds(
+    superDb.collection("role_invites").doc("dr_tarek@unicore.edu").set({
+      email: "dr_tarek@unicore.edu",
+      displayNameHint: "Dr. Tarek",
+      assignedRole: "ADMIN",
+      invitedBy: SUPER_ADMIN_UID,
+      invitedByLabel: "Super Admin",
+      status: "PENDING",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Invited Admin signs in with verified email and claims invite + creates admin doc
+  const tarekDb = testEnv
+    .authenticatedContext("tarek_uid", { email: "Dr_Tarek@unicore.edu", email_verified: true })
+    .firestore();
+  await assertSucceeds(tarekDb.collection("role_invites").doc("dr_tarek@unicore.edu").get());
+  await assertSucceeds(
+    tarekDb.collection("admins").doc("tarek_uid").set({
+      userId: "tarek_uid",
+      email: "dr_tarek@unicore.edu",
+      grantedBy: SUPER_ADMIN_UID,
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+  await assertSucceeds(
+    tarekDb.collection("role_invites").doc("dr_tarek@unicore.edu").update({
+      status: "CLAIMED",
+      claimedByUid: "tarek_uid",
+      updatedAt: pastDate(500),
+    })
+  );
+});
+
+test("12. Notifications RBAC: Admins send broadcasts/targeted alerts; Students read only ALL or own", async () => {
+  await seedRolesAndBaseData();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+  const aliceDb = testEnv.authenticatedContext(STUDENT_A).firestore();
+  const bobDb = testEnv.authenticatedContext(STUDENT_B).firestore();
+
+  await assertSucceeds(
+    adminDb.collection("notifications").doc("notif_all_1").set({
+      title: "Midterm Week",
+      body: "Review CS101 Zero-Trust notes.",
+      category: "COURSE",
+      targetUid: "ALL",
+      senderUid: ADMIN_UID,
+      senderName: "Dr. Carol",
+      createdAt: pastDate(),
+    })
+  );
+
+  await assertSucceeds(
+    adminDb.collection("notifications").doc("notif_bob_1").set({
+      title: "Grade Published",
+      body: "Your Midterm grade is ready.",
+      category: "GRADE",
+      targetUid: STUDENT_B,
+      senderUid: ADMIN_UID,
+      senderName: "Dr. Carol",
+      createdAt: pastDate(),
+    })
+  );
+
+  // Student cannot create broadcast notification
+  await assertFails(
+    aliceDb.collection("notifications").doc("fake_notif").set({
+      title: "Fake Alert",
+      body: "Class canceled",
+      category: "ANNOUNCEMENT",
+      targetUid: "ALL",
+      senderUid: STUDENT_A,
+      senderName: "Alice Student",
+      createdAt: pastDate(),
+    })
+  );
+
+  // Alice cannot read Bob's private grade notification directly or via unfiltered list
+  await assertFails(aliceDb.collection("notifications").doc("notif_bob_1").get());
+  await assertFails(aliceDb.collection("notifications").get());
+
+  // Aligned whereIn(["ALL", uid]) query succeeds for Alice and Bob
+  await assertSucceeds(
+    aliceDb.collection("notifications").where("targetUid", "in", ["ALL", STUDENT_A]).get()
+  );
+  await assertSucceeds(
+    bobDb.collection("notifications").where("targetUid", "in", ["ALL", STUDENT_B]).get()
+  );
+});
+

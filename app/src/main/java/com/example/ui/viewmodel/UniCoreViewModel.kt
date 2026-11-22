@@ -10,13 +10,18 @@ import com.example.data.model.AuditLog
 import com.example.data.model.AuditSeverity
 import com.example.data.model.Course
 import com.example.data.model.MaterialType
+import com.example.data.model.NotificationCategory
 import com.example.data.model.Quiz
 import com.example.data.model.QuizAttempt
+import com.example.data.model.RoleInvite
 import com.example.data.model.SystemSettings
+import com.example.data.model.UniNotification
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
 import com.example.data.model.VerifiedFileRecord
+import com.example.data.preferences.AppLanguage
 import com.example.data.repository.AiTutorRepository
+import com.example.data.repository.UniCoreGovernanceRepository
 import com.example.data.repository.UniCoreRepository
 import com.example.security.InputValidator
 import com.example.security.RateLimiter
@@ -59,6 +64,7 @@ sealed interface AiUiState {
 @OptIn(ExperimentalCoroutinesApi::class)
 class UniCoreViewModel(
     private val repository: UniCoreRepository,
+    private val governance: UniCoreGovernanceRepository,
     private val aiRepository: AiTutorRepository,
     private val rateLimiter: RateLimiter,
     private val currentUserId: String
@@ -76,7 +82,7 @@ class UniCoreViewModel(
 
     init {
         viewModelScope.launch {
-            val res = repository.ensureUserSessionProfile()
+            val res = repository.ensureUserSessionProfile(governance)
             res.onSuccess { resolvedRole ->
                 _userRole.value = resolvedRole
                 _sessionReady.value = true
@@ -105,7 +111,7 @@ class UniCoreViewModel(
     val systemSettings: StateFlow<SystemSettings> = _sessionReady
         .flatMapLatest { ready ->
             if (!ready) flowOf(SystemSettings())
-            else repository.observeSystemSettings()
+            else governance.observeSystemSettings()
                 .catch { error ->
                     unwrapFirestoreOrRethrow(error, "observeSystemSettings")
                     emit(SystemSettings())
@@ -160,11 +166,35 @@ class UniCoreViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Loading)
 
+    val notificationsState: StateFlow<UiState<List<UniNotification>>> =
+        combine(_sessionReady, _userRole) { ready, role -> ready to (role != UserRole.STUDENT) }
+            .flatMapLatest { (ready, isAdmin) ->
+                if (!ready) flowOf(UiState.Loading)
+                else governance.observeNotifications(isAdmin).asUiState("notifications")
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Loading)
+
+    val usersDirectoryState: StateFlow<UiState<List<UserProfile>>> =
+        combine(_sessionReady, _userRole) { ready, role -> ready to (role != UserRole.STUDENT) }
+            .flatMapLatest { (ready, isAdmin) ->
+                if (!ready || !isAdmin) flowOf(UiState.Success(emptyList()))
+                else governance.observeAllUsers().asUiState("users")
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Success(emptyList()))
+
+    val roleInvitesState: StateFlow<UiState<List<RoleInvite>>> =
+        combine(_sessionReady, _userRole) { ready, role -> ready to (role != UserRole.STUDENT) }
+            .flatMapLatest { (ready, isAdmin) ->
+                if (!ready || !isAdmin) flowOf(UiState.Success(emptyList()))
+                else governance.observeRoleInvites().asUiState("role_invites")
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Success(emptyList()))
+
     val auditLogsState: StateFlow<UiState<List<AuditLog>>> =
         combine(_sessionReady, _userRole) { ready, role -> ready to (role != UserRole.STUDENT) }
             .flatMapLatest { (ready, isAdmin) ->
                 if (!ready || !isAdmin) flowOf(UiState.Success(emptyList()))
-                else repository.observeAuditLogs().asUiState("audit_logs")
+                else governance.observeAuditLogs().asUiState("audit_logs")
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Success(emptyList()))
 
@@ -172,12 +202,16 @@ class UniCoreViewModel(
         combine(_sessionReady, _userRole) { ready, role -> ready to (role == UserRole.SUPER_ADMIN) }
             .flatMapLatest { (ready, isSuperAdmin) ->
                 if (!ready || !isSuperAdmin) flowOf(UiState.Success(emptyList()))
-                else repository.observeAdmins().asUiState("admins")
+                else governance.observeAdmins().asUiState("admins")
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Success(emptyList()))
 
     fun clearBanner() {
         _statusBanner.value = null
+    }
+
+    fun clearAiState() {
+        _aiUiState.value = AiUiState.Idle
     }
 
     fun createCourse(
@@ -188,7 +222,7 @@ class UniCoreViewModel(
     ) {
         viewModelScope.launch {
             if (_userRole.value == UserRole.STUDENT) {
-                repository.logAuditEvent(
+                governance.logAuditEvent(
                     "UNAUTHORIZED_ADMIN_ATTEMPT",
                     AuditSeverity.HIGH,
                     "courses",
@@ -211,11 +245,23 @@ class UniCoreViewModel(
                 description = description,
                 materialLink = materialLink.ifBlank { null },
                 materialType = materialType,
-                published = true
+                published = true,
+                governance = governance
             )
             _statusBanner.value = result.fold(
-                onSuccess = { "Course published securely." },
+                onSuccess = { "Course published." },
                 onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Failed to create course.") }
+            )
+        }
+    }
+
+    fun deleteCourse(courseId: String) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) return@launch
+            val result = repository.deleteCourse(courseId)
+            _statusBanner.value = result.fold(
+                onSuccess = { "Course deleted." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not delete course.") }
             )
         }
     }
@@ -224,13 +270,13 @@ class UniCoreViewModel(
         courseId: String,
         title: String,
         durationMinutes: Int,
-        questionPrompt: String,
-        options: List<String>,
-        correctIndex: Int
+        questionPrompts: List<String>,
+        optionBlocks: List<String>,
+        correctIndices: List<Int>
     ) {
         viewModelScope.launch {
             if (_userRole.value == UserRole.STUDENT) {
-                repository.logAuditEvent(
+                governance.logAuditEvent(
                     "UNAUTHORIZED_ADMIN_ATTEMPT",
                     AuditSeverity.HIGH,
                     "quizzes",
@@ -244,23 +290,35 @@ class UniCoreViewModel(
                 courseId = courseId,
                 title = title,
                 durationMinutes = durationMinutes,
-                questionPrompt = questionPrompt,
-                options = options,
-                correctOptionIndex = correctIndex
+                questionPrompts = questionPrompts,
+                optionBlocks = optionBlocks,
+                correctOptionIndices = correctIndices,
+                governance = governance
             )
             _statusBanner.value = result.fold(
-                onSuccess = { "Quiz created with isolated protected answer key." },
+                onSuccess = { "Quiz created." },
                 onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Failed to create quiz.") }
             )
         }
     }
 
-    fun submitQuizAttempt(quiz: Quiz, selectedIndex: Int) {
+    fun deleteQuiz(quizId: String) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) return@launch
+            val result = repository.deleteQuiz(quizId)
+            _statusBanner.value = result.fold(
+                onSuccess = { "Quiz deleted." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not delete quiz.") }
+            )
+        }
+    }
+
+    fun submitQuizAttempt(quiz: Quiz, selectedIndices: List<Int>) {
         viewModelScope.launch {
             if (!checkWriteQuota()) return@launch
             when (val rate = rateLimiter.checkAndConsume(RateLimiter.Bucket.QUIZ_SUBMIT)) {
                 is RateLimiter.Decision.Blocked -> {
-                    repository.logAuditEvent(
+                    governance.logAuditEvent(
                         "RATE_LIMIT_TRIGGERED",
                         AuditSeverity.WARN,
                         "quiz_attempts",
@@ -275,10 +333,11 @@ class UniCoreViewModel(
             val result = repository.submitQuizAttempt(
                 quizId = quiz.id,
                 quizTitle = quiz.title,
-                selectedIndices = listOf(selectedIndex)
+                selectedIndices = selectedIndices,
+                governance = governance
             )
             _statusBanner.value = result.fold(
-                onSuccess = { "Quiz submitted! Grade awaits Admin verification against isolated key." },
+                onSuccess = { "Quiz submitted for grading." },
                 onFailure = {
                     InputValidator.safeUserErrorMessage(
                         it,
@@ -292,7 +351,7 @@ class UniCoreViewModel(
     fun gradeAttemptAsAdmin(attempt: QuizAttempt) {
         viewModelScope.launch {
             if (_userRole.value == UserRole.STUDENT) {
-                repository.logAuditEvent(
+                governance.logAuditEvent(
                     "UNAUTHORIZED_ADMIN_ATTEMPT",
                     AuditSeverity.CRITICAL,
                     "quiz_attempts/${attempt.id}",
@@ -301,9 +360,9 @@ class UniCoreViewModel(
                 _statusBanner.value = "Access denied."
                 return@launch
             }
-            val result = repository.gradeQuizAttemptAsAdmin(attempt)
+            val result = repository.gradeQuizAttemptAsAdmin(attempt, governance)
             _statusBanner.value = result.fold(
-                onSuccess = { score -> "Attempt graded against protected key: $score%." },
+                onSuccess = { score -> "Attempt graded: $score%." },
                 onFailure = { InputValidator.safeUserErrorMessage(it, "Unable to finalize grade.") }
             )
         }
@@ -320,7 +379,7 @@ class UniCoreViewModel(
             }
             when (validation) {
                 is SecureFileValidator.FileValidationResult.Rejected -> {
-                    repository.logAuditEvent(
+                    governance.logAuditEvent(
                         "FILE_UPLOAD_REJECTED",
                         AuditSeverity.WARN,
                         "users/$currentUserId/files",
@@ -329,11 +388,9 @@ class UniCoreViewModel(
                     _statusBanner.value = "Blocked: ${validation.reason}"
                 }
                 is SecureFileValidator.FileValidationResult.Success -> {
-                    val res = repository.recordVerifiedFile(validation.file)
+                    val res = repository.recordVerifiedFile(validation.file, governance)
                     _statusBanner.value = res.fold(
-                        onSuccess = {
-                            "Verified & sandboxed (${validation.file.mimeType}, SHA-256 ${validation.file.sha256Hex.take(10)}...)"
-                        },
+                        onSuccess = { "Saved (${validation.file.originalName})" },
                         onFailure = { InputValidator.safeUserErrorMessage(it, "Could not save file metadata.") }
                     )
                 }
@@ -341,21 +398,16 @@ class UniCoreViewModel(
         }
     }
 
-    fun askAiTutor(rawPrompt: String) {
+    fun askAiTutor(rawPrompt: String, preferredLanguage: AppLanguage) {
         viewModelScope.launch {
             val quota = quotaSnapshot.value
             if (quota.aiHealth == ZeroCostQuotaManager.QuotaHealth.PAUSED_LIMIT_REACHED) {
                 val reason = if (!quota.aiGloballyEnabled || quota.zeroCostLockActive) {
                     "AI Tutor is paused by Super Admin Zero-Cost Lock."
                 } else {
-                    "Daily free-tier AI quota (${quota.aiDailyCap}/${quota.aiDailyCap}) reached. Paused safely at zero cost."
+                    "Daily free-tier AI quota (${quota.aiDailyCap}/${quota.aiDailyCap}) reached."
                 }
-                repository.logAuditEvent(
-                    "QUOTA_LOCKED",
-                    AuditSeverity.WARN,
-                    "ai_logic",
-                    reason
-                )
+                governance.logAuditEvent("QUOTA_LOCKED", AuditSeverity.WARN, "ai_logic", reason)
                 _aiUiState.value = AiUiState.PausedQuota(reason)
                 return@launch
             }
@@ -370,12 +422,7 @@ class UniCoreViewModel(
 
             when (val rate = rateLimiter.checkAndConsume(RateLimiter.Bucket.AI_TUTOR)) {
                 is RateLimiter.Decision.Blocked -> {
-                    repository.logAuditEvent(
-                        "RATE_LIMIT_TRIGGERED",
-                        AuditSeverity.WARN,
-                        "ai_logic",
-                        "AI Tutor rate limit enforced."
-                    )
+                    governance.logAuditEvent("RATE_LIMIT_TRIGGERED", AuditSeverity.WARN, "ai_logic", "AI rate limit.")
                     _aiUiState.value = AiUiState.Error(rate.reason)
                     return@launch
                 }
@@ -383,19 +430,19 @@ class UniCoreViewModel(
             }
 
             if (quota.aiHealth == ZeroCostQuotaManager.QuotaHealth.WARNING_80_PERCENT) {
-                repository.logAuditEvent(
+                governance.logAuditEvent(
                     "QUOTA_WARNING",
                     AuditSeverity.WARN,
                     "ai_logic",
-                    "User reached >=80% of daily zero-cost AI cap (${quota.aiUsedToday}/${quota.aiDailyCap})."
+                    "User reached >=80% daily AI cap (${quota.aiUsedToday}/${quota.aiDailyCap})."
                 )
-                _statusBanner.value = "Free-Tier Alert: ${quota.aiUsedToday}/${quota.aiDailyCap} AI calls used today."
+                _statusBanner.value = "Free-Tier Alert: ${quota.aiUsedToday}/${quota.aiDailyCap} AI calls used."
             }
 
             _aiUiState.value = AiUiState.Loading
             var finalResponse = ""
             try {
-                aiRepository.streamStudyAnswer(cleanPrompt).collect { partial ->
+                aiRepository.streamStudyAnswer(cleanPrompt, preferredLanguage).collect { partial ->
                     finalResponse = partial
                     _aiUiState.value = AiUiState.Streaming(partial)
                 }
@@ -419,6 +466,83 @@ class UniCoreViewModel(
         }
     }
 
+    fun inviteAccountByEmail(email: String, nameHint: String, assignedRole: UserRole) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) {
+                _statusBanner.value = "Access denied."
+                return@launch
+            }
+            if (assignedRole == UserRole.ADMIN && _userRole.value != UserRole.SUPER_ADMIN) {
+                governance.logAuditEvent(
+                    "UNAUTHORIZED_ADMIN_ATTEMPT",
+                    AuditSeverity.CRITICAL,
+                    "role_invites",
+                    "Regular Admin attempted to invite an Admin account."
+                )
+                _statusBanner.value = "Only Super Admin can add Admin accounts."
+                return@launch
+            }
+            val res = governance.inviteAccountByEmail(email, nameHint, assignedRole)
+            _statusBanner.value = res.fold(
+                onSuccess = { "Account added (${assignedRole.name}). Activated on Google Sign-In." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Failed to add account.") }
+            )
+        }
+    }
+
+    fun revokeInvite(emailKey: String) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) return@launch
+            val res = governance.revokeInvite(emailKey)
+            _statusBanner.value = res.fold(
+                onSuccess = { "Invite removed." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not remove invite.") }
+            )
+        }
+    }
+
+    fun promoteUserToAdmin(targetUser: UserProfile) {
+        viewModelScope.launch {
+            if (_userRole.value != UserRole.SUPER_ADMIN) {
+                governance.logAuditEvent(
+                    "UNAUTHORIZED_ADMIN_ATTEMPT",
+                    AuditSeverity.CRITICAL,
+                    "admins/${targetUser.userId}",
+                    "Non-SuperAdmin attempted to promote user."
+                )
+                _statusBanner.value = "Only Super Admin can promote Admins."
+                return@launch
+            }
+            val res = governance.promoteUserToAdmin(targetUser)
+            _statusBanner.value = res.fold(
+                onSuccess = { "${targetUser.displayName} promoted to Admin." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Promotion failed.") }
+            )
+        }
+    }
+
+    fun demoteAdminToStudent(targetUid: String) {
+        viewModelScope.launch {
+            if (_userRole.value != UserRole.SUPER_ADMIN) return@launch
+            val res = governance.demoteAdminToStudent(targetUid)
+            _statusBanner.value = res.fold(
+                onSuccess = { "User set back to Student." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not update role.") }
+            )
+        }
+    }
+
+    fun sendBroadcastNotification(title: String, body: String, category: NotificationCategory) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) return@launch
+            val res = governance.sendNotification(title, body, category, "ALL")
+            _statusBanner.value = res.fold(
+                onSuccess = { "Notification sent." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not send notification.") }
+            )
+        }
+    }
+
     fun updateSystemSettings(
         dailyAiLimit: Long,
         dailyWriteLimit: Long,
@@ -427,55 +551,24 @@ class UniCoreViewModel(
     ) {
         viewModelScope.launch {
             if (_userRole.value != UserRole.SUPER_ADMIN) {
-                repository.logAuditEvent(
+                governance.logAuditEvent(
                     "UNAUTHORIZED_ADMIN_ATTEMPT",
                     AuditSeverity.CRITICAL,
                     "system_settings/global",
-                    "Non-SuperAdmin attempted to alter Super Admin system settings."
+                    "Non-SuperAdmin attempted to alter Super Admin settings."
                 )
-                _statusBanner.value = "Access denied: Super Admin privilege required."
+                _statusBanner.value = "Super Admin privilege required."
                 return@launch
             }
-            val result = repository.updateSystemSettingsAsSuperAdmin(
+            val result = governance.updateSystemSettingsAsSuperAdmin(
                 dailyAiLimit = dailyAiLimit,
                 dailyWriteLimit = dailyWriteLimit,
                 aiEnabled = aiEnabled,
                 zeroCostLockActive = zeroCostLockActive
             )
             _statusBanner.value = result.fold(
-                onSuccess = { "Super Admin Zero-Cost policies updated." },
-                onFailure = { InputValidator.safeUserErrorMessage(it, "Failed to update system settings.") }
-            )
-        }
-    }
-
-    fun grantAdminRole(targetUid: String, targetEmail: String) {
-        viewModelScope.launch {
-            if (_userRole.value != UserRole.SUPER_ADMIN) {
-                repository.logAuditEvent(
-                    "UNAUTHORIZED_ADMIN_ATTEMPT",
-                    AuditSeverity.CRITICAL,
-                    "admins/$targetUid",
-                    "Non-SuperAdmin attempted to grant Admin privilege."
-                )
-                _statusBanner.value = "Access denied: Only Super Admin can manage Admin roles."
-                return@launch
-            }
-            val res = repository.grantAdminRoleAsSuperAdmin(targetUid, targetEmail)
-            _statusBanner.value = res.fold(
-                onSuccess = { "Admin role granted safely." },
-                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Role update failed.") }
-            )
-        }
-    }
-
-    fun revokeAdminRole(targetUid: String) {
-        viewModelScope.launch {
-            if (_userRole.value != UserRole.SUPER_ADMIN) return@launch
-            val res = repository.revokeAdminRoleAsSuperAdmin(targetUid)
-            _statusBanner.value = res.fold(
-                onSuccess = { "Admin role revoked." },
-                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not revoke role.") }
+                onSuccess = { "Settings saved." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Failed to update settings.") }
             )
         }
     }

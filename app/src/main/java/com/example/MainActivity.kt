@@ -15,12 +15,19 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.FolderSpecial
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Quiz
 import androidx.compose.material.icons.filled.School
-import androidx.compose.material.icons.filled.Security
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -31,8 +38,10 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -45,8 +54,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -54,36 +65,66 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.data.model.UserRole
+import com.example.data.preferences.AppLanguage
+import com.example.data.preferences.AppThemeMode
+import com.example.data.preferences.UserPreferences
+import com.example.data.preferences.UserPreferencesRepository
 import com.example.data.repository.AiTutorRepository
+import com.example.data.repository.UniCoreGovernanceRepository
 import com.example.data.repository.UniCoreRepository
 import com.example.data.repository.signOut
+import com.example.notifications.UniCoreNotificationManager
 import com.example.security.RateLimiter
 import com.example.security.configureAppCheck
+import com.example.ui.i18n.LocalAppStrings
+import com.example.ui.i18n.UniCoreStrings
+import com.example.ui.i18n.stringsFor
 import com.example.ui.screens.AiTutorScreen
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CoursesScreen
+import com.example.ui.screens.NotificationsSheet
 import com.example.ui.screens.QuizzesScreen
 import com.example.ui.screens.SecureFilesVaultScreen
 import com.example.ui.screens.SecurityConsoleScreen
 import com.example.ui.theme.UniCoreTheme
+import com.example.ui.viewmodel.UiState
 import com.example.ui.viewmodel.UniCoreViewModel
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Step 1: Configure Firebase App Check before Compose UI or any Firebase operation
         configureAppCheck(this, intent)
+        UniCoreNotificationManager.ensureChannel(applicationContext)
 
         enableEdgeToEdge()
         setContent {
-            UniCoreTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    UniCoreApp()
+            val prefsRepository = remember { UserPreferencesRepository(applicationContext) }
+            val prefs by prefsRepository.preferencesFlow.collectAsStateWithLifecycle(initialValue = UserPreferences())
+            val appStrings = remember(prefs.language) { stringsFor(prefs.language) }
+            val layoutDirection = if (prefs.language == AppLanguage.ARABIC) {
+                LayoutDirection.Rtl
+            } else {
+                LayoutDirection.Ltr
+            }
+
+            UniCoreTheme(themeMode = prefs.themeMode) {
+                CompositionLocalProvider(
+                    LocalAppStrings provides appStrings,
+                    LocalLayoutDirection provides layoutDirection
+                ) {
+                    Surface(modifier = Modifier.fillMaxSize()) {
+                        UniCoreApp(
+                            prefs = prefs,
+                            prefsRepository = prefsRepository
+                        )
+                    }
                 }
             }
         }
@@ -91,19 +132,31 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class UniCoreTab(
-    val labelRes: Int,
     val icon: ImageVector,
     val testTag: String
 ) {
-    COURSES(R.string.nav_courses, Icons.Default.School, "tab_courses"),
-    QUIZZES(R.string.nav_quizzes, Icons.Default.Quiz, "tab_quizzes"),
-    AI_TUTOR(R.string.nav_tutor, Icons.Default.AutoAwesome, "tab_ai_tutor"),
-    VAULT(R.string.nav_vault, Icons.Default.FolderSpecial, "tab_vault"),
-    SECURITY(R.string.nav_security, Icons.Default.Security, "tab_security")
+    COURSES(Icons.Default.School, "tab_courses"),
+    QUIZZES(Icons.Default.Quiz, "tab_quizzes"),
+    AI_TUTOR(Icons.Default.AutoAwesome, "tab_ai_tutor"),
+    VAULT(Icons.Default.FolderSpecial, "tab_vault"),
+    ACCOUNT(Icons.Default.Person, "tab_security");
+
+    fun label(strings: UniCoreStrings): String = when (this) {
+        COURSES -> strings.navCourses
+        QUIZZES -> strings.navQuizzes
+        AI_TUTOR -> strings.navTutor
+        VAULT -> strings.navFiles
+        ACCOUNT -> strings.navAccount
+    }
 }
 
 @Composable
-fun UniCoreApp(auth: FirebaseAuth = Firebase.auth) {
+fun UniCoreApp(
+    prefs: UserPreferences,
+    prefsRepository: UserPreferencesRepository,
+    auth: FirebaseAuth = Firebase.auth
+) {
+    val scope = rememberCoroutineScope()
     var currentUser by remember { mutableStateOf(auth.currentUser) }
     DisposableEffect(auth) {
         val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
@@ -113,21 +166,53 @@ fun UniCoreApp(auth: FirebaseAuth = Firebase.auth) {
         onDispose { auth.removeAuthStateListener(listener) }
     }
 
+    val cycleTheme: () -> Unit = {
+        val next = when (prefs.themeMode) {
+            AppThemeMode.SYSTEM -> AppThemeMode.DARK
+            AppThemeMode.DARK -> AppThemeMode.LIGHT
+            AppThemeMode.LIGHT -> AppThemeMode.SYSTEM
+        }
+        scope.launch { prefsRepository.setThemeMode(next) }
+    }
+
+    val setLanguage: (AppLanguage) -> Unit = { lang ->
+        scope.launch { prefsRepository.setLanguage(lang) }
+    }
+
     val user = currentUser
     if (user == null) {
-        AuthScreen(onAuthSuccess = { currentUser = auth.currentUser })
+        AuthScreen(
+            currentLanguage = prefs.language,
+            currentThemeMode = prefs.themeMode,
+            onToggleLanguage = setLanguage,
+            onCycleTheme = cycleTheme,
+            onAuthSuccess = { currentUser = auth.currentUser }
+        )
     } else {
         val uid = user.uid
         key(uid) {
-            UniCoreAuthenticatedShell(currentUserId = uid)
+            UniCoreAuthenticatedShell(
+                currentUserId = uid,
+                prefs = prefs,
+                prefsRepository = prefsRepository,
+                onSetLanguage = setLanguage,
+                onCycleTheme = cycleTheme
+            )
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun UniCoreAuthenticatedShell(currentUserId: String) {
+private fun UniCoreAuthenticatedShell(
+    currentUserId: String,
+    prefs: UserPreferences,
+    prefsRepository: UserPreferencesRepository,
+    onSetLanguage: (AppLanguage) -> Unit,
+    onCycleTheme: () -> Unit
+) {
     val context = LocalContext.current
+    val strings = LocalAppStrings.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
 
@@ -142,6 +227,7 @@ private fun UniCoreAuthenticatedShell(currentUserId: String) {
                 val db = FirebaseFirestore.getInstance(databaseId)
                 UniCoreViewModel(
                     repository = UniCoreRepository(db),
+                    governance = UniCoreGovernanceRepository(db),
                     aiRepository = AiTutorRepository(),
                     rateLimiter = RateLimiter(app.applicationContext),
                     currentUserId = currentUserId
@@ -151,6 +237,8 @@ private fun UniCoreAuthenticatedShell(currentUserId: String) {
     )
 
     var selectedTab by remember { mutableStateOf(UniCoreTab.COURSES) }
+    var showNotificationsSheet by remember { mutableStateOf(false) }
+
     if (selectedTab != UniCoreTab.COURSES) {
         BackHandler { selectedTab = UniCoreTab.COURSES }
     }
@@ -163,10 +251,44 @@ private fun UniCoreAuthenticatedShell(currentUserId: String) {
     val quizzesState by viewModel.quizzesState.collectAsStateWithLifecycle()
     val attemptsState by viewModel.attemptsState.collectAsStateWithLifecycle()
     val filesState by viewModel.verifiedFilesState.collectAsStateWithLifecycle()
+    val notificationsState by viewModel.notificationsState.collectAsStateWithLifecycle()
+    val usersDirectoryState by viewModel.usersDirectoryState.collectAsStateWithLifecycle()
+    val roleInvitesState by viewModel.roleInvitesState.collectAsStateWithLifecycle()
     val auditLogsState by viewModel.auditLogsState.collectAsStateWithLifecycle()
-    val adminsState by viewModel.adminsState.collectAsStateWithLifecycle()
     val aiUiState by viewModel.aiUiState.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
+
+    val notifications = (notificationsState as? UiState.Success)?.data.orEmpty()
+    val unreadCount = remember(notifications, prefs.readNotificationIds) {
+        notifications.count { it.id !in prefs.readNotificationIds }
+    }
+
+    // Dispatch local tray notifications only for newly incoming unread alerts after initial snapshot seed
+    val seenNotificationIds = remember(currentUserId) { mutableSetOf<String>() }
+    var initializedNotifications by remember(currentUserId) { mutableStateOf(false) }
+    LaunchedEffect(notificationsState, prefs.systemNotificationsEnabled) {
+        val currentList = (notificationsState as? UiState.Success)?.data ?: return@LaunchedEffect
+        if (!initializedNotifications) {
+            seenNotificationIds.addAll(currentList.map { it.id })
+            initializedNotifications = true
+            return@LaunchedEffect
+        }
+        val newAlerts = currentList.filter { it.id !in seenNotificationIds }
+        seenNotificationIds.addAll(newAlerts.map { it.id })
+        if (prefs.systemNotificationsEnabled) {
+            newAlerts
+                .filter { it.id !in prefs.readNotificationIds && it.senderUid != currentUserId }
+                .take(3)
+                .forEach { alert ->
+                    UniCoreNotificationManager.showSystemNotification(
+                        context = context,
+                        notificationIdKey = alert.id,
+                        title = alert.title,
+                        body = alert.body
+                    )
+                }
+        }
+    }
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(statusBanner) {
@@ -175,6 +297,12 @@ private fun UniCoreAuthenticatedShell(currentUserId: String) {
             snackbarHostState.showSnackbar(msg)
             viewModel.clearBanner()
         }
+    }
+
+    val localizedRole = when (userRole) {
+        UserRole.SUPER_ADMIN -> strings.roleSuperAdmin
+        UserRole.ADMIN -> strings.roleAdmin
+        UserRole.STUDENT -> strings.roleStudent
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -186,9 +314,59 @@ private fun UniCoreAuthenticatedShell(currentUserId: String) {
                 TopAppBar(
                     title = {
                         Text(
-                            text = "UniCore • ${userRole.name.replace("_", " ")}",
-                            style = MaterialTheme.typography.titleLarge
+                            text = "${strings.appName} • $localizedRole",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
                         )
+                    },
+                    actions = {
+                        TextButton(
+                            onClick = {
+                                val nextLang = if (prefs.language == AppLanguage.ARABIC) {
+                                    AppLanguage.ENGLISH
+                                } else {
+                                    AppLanguage.ARABIC
+                                }
+                                onSetLanguage(nextLang)
+                            },
+                            modifier = Modifier.testTag("topbar_language_toggle")
+                        ) {
+                            Text(strings.switchLanguageShort, fontWeight = FontWeight.Bold)
+                        }
+
+                        IconButton(
+                            onClick = onCycleTheme,
+                            modifier = Modifier.testTag("topbar_theme_toggle")
+                        ) {
+                            Icon(
+                                imageVector = when (prefs.themeMode) {
+                                    AppThemeMode.SYSTEM -> Icons.Default.BrightnessAuto
+                                    AppThemeMode.DARK -> Icons.Default.DarkMode
+                                    AppThemeMode.LIGHT -> Icons.Default.LightMode
+                                },
+                                contentDescription = strings.themeLabel
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { showNotificationsSheet = true },
+                            modifier = Modifier.testTag("topbar_notifications_button")
+                        ) {
+                            BadgedBox(
+                                badge = {
+                                    if (unreadCount > 0) {
+                                        Badge {
+                                            Text(if (unreadCount > 9) "9+" else unreadCount.toString())
+                                        }
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Notifications,
+                                    contentDescription = strings.notificationsTitle
+                                )
+                            }
+                        }
                     }
                 )
             },
@@ -197,16 +375,17 @@ private fun UniCoreAuthenticatedShell(currentUserId: String) {
                 if (!useNavigationRail) {
                     NavigationBar {
                         UniCoreTab.entries.forEach { tab ->
+                            val label = tab.label(strings)
                             NavigationBarItem(
                                 selected = selectedTab == tab,
                                 onClick = { selectedTab = tab },
                                 icon = {
                                     Icon(
                                         imageVector = tab.icon,
-                                        contentDescription = stringResource(tab.labelRes)
+                                        contentDescription = label
                                     )
                                 },
-                                label = { Text(stringResource(tab.labelRes)) },
+                                label = { Text(label, maxLines = 1) },
                                 modifier = Modifier.testTag(tab.testTag)
                             )
                         }
@@ -222,16 +401,17 @@ private fun UniCoreAuthenticatedShell(currentUserId: String) {
                 if (useNavigationRail) {
                     NavigationRail {
                         UniCoreTab.entries.forEach { tab ->
+                            val label = tab.label(strings)
                             NavigationRailItem(
                                 selected = selectedTab == tab,
                                 onClick = { selectedTab = tab },
                                 icon = {
                                     Icon(
                                         imageVector = tab.icon,
-                                        contentDescription = stringResource(tab.labelRes)
+                                        contentDescription = label
                                     )
                                 },
-                                label = { Text(stringResource(tab.labelRes)) },
+                                label = { Text(label, maxLines = 1) },
                                 modifier = Modifier.testTag(tab.testTag)
                             )
                         }
@@ -244,12 +424,13 @@ private fun UniCoreAuthenticatedShell(currentUserId: String) {
                         .fillMaxSize(),
                     contentAlignment = Alignment.TopCenter
                 ) {
-                    Box(modifier = Modifier.widthIn(max = 720.dp)) {
+                    Box(modifier = Modifier.widthIn(max = 760.dp)) {
                         when (selectedTab) {
                             UniCoreTab.COURSES -> CoursesScreen(
                                 coursesState = coursesState,
                                 userRole = userRole,
-                                onCreateCourse = viewModel::createCourse
+                                onCreateCourse = viewModel::createCourse,
+                                onDeleteCourse = viewModel::deleteCourse
                             )
                             UniCoreTab.QUIZZES -> QuizzesScreen(
                                 quizzesState = quizzesState,
@@ -257,28 +438,44 @@ private fun UniCoreAuthenticatedShell(currentUserId: String) {
                                 coursesState = coursesState,
                                 userRole = userRole,
                                 onCreateQuiz = viewModel::createQuiz,
+                                onDeleteQuiz = viewModel::deleteQuiz,
                                 onSubmitAttempt = viewModel::submitQuizAttempt,
                                 onGradeAttempt = viewModel::gradeAttemptAsAdmin
                             )
                             UniCoreTab.AI_TUTOR -> AiTutorScreen(
                                 aiState = aiUiState,
                                 quotaSnapshot = quotaSnapshot,
-                                onAskTutor = viewModel::askAiTutor
+                                onAskTutor = { prompt -> viewModel.askAiTutor(prompt, prefs.language) },
+                                onClearTutor = viewModel::clearAiState
                             )
                             UniCoreTab.VAULT -> SecureFilesVaultScreen(
                                 filesState = filesState,
                                 onFilePicked = { uri -> viewModel.validateAndStoreFile(context, uri) }
                             )
-                            UniCoreTab.SECURITY -> SecurityConsoleScreen(
+                            UniCoreTab.ACCOUNT -> SecurityConsoleScreen(
+                                currentUserId = currentUserId,
                                 userRole = userRole,
                                 userProfile = userProfile,
                                 systemSettings = systemSettings,
                                 quotaSnapshot = quotaSnapshot,
+                                currentLanguage = prefs.language,
+                                currentThemeMode = prefs.themeMode,
+                                systemNotificationsEnabled = prefs.systemNotificationsEnabled,
                                 auditLogsState = auditLogsState,
-                                adminsState = adminsState,
+                                usersDirectoryState = usersDirectoryState,
+                                roleInvitesState = roleInvitesState,
+                                onSetLanguage = onSetLanguage,
+                                onSetThemeMode = { mode ->
+                                    scope.launch { prefsRepository.setThemeMode(mode) }
+                                },
+                                onSetSystemNotifications = { enabled ->
+                                    scope.launch { prefsRepository.setSystemNotificationsEnabled(enabled) }
+                                },
+                                onInviteAccount = viewModel::inviteAccountByEmail,
+                                onRevokeInvite = viewModel::revokeInvite,
+                                onPromoteUser = viewModel::promoteUserToAdmin,
+                                onDemoteAdmin = viewModel::demoteAdminToStudent,
                                 onUpdateSettings = viewModel::updateSystemSettings,
-                                onGrantAdmin = viewModel::grantAdminRole,
-                                onRevokeAdmin = viewModel::revokeAdminRole,
                                 onSignOut = { signOut(credentialManager, scope) }
                             )
                         }
@@ -286,5 +483,24 @@ private fun UniCoreAuthenticatedShell(currentUserId: String) {
                 }
             }
         }
+    }
+
+    if (showNotificationsSheet) {
+        NotificationsSheet(
+            notificationsState = notificationsState,
+            readIds = prefs.readNotificationIds,
+            userRole = userRole,
+            onDismiss = { showNotificationsSheet = false },
+            onMarkRead = { notifId ->
+                scope.launch { prefsRepository.markNotificationRead(notifId) }
+            },
+            onMarkAllRead = { ids ->
+                scope.launch { prefsRepository.markAllNotificationsRead(ids) }
+            },
+            onSendAnnouncement = viewModel::sendBroadcastNotification,
+            onPermissionResult = { granted ->
+                scope.launch { prefsRepository.setSystemNotificationsEnabled(granted) }
+            }
+        )
     }
 }

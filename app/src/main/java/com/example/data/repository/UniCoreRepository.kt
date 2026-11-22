@@ -4,15 +4,14 @@ import android.content.Context
 import com.example.R
 import com.example.data.OperationType
 import com.example.data.handleFirestoreError
-import com.example.data.model.AdminRecord
-import com.example.data.model.AuditLog
 import com.example.data.model.AuditSeverity
 import com.example.data.model.Course
 import com.example.data.model.MaterialType
+import com.example.data.model.NotificationCategory
 import com.example.data.model.Quiz
 import com.example.data.model.QuizAnswerKey
 import com.example.data.model.QuizAttempt
-import com.example.data.model.SystemSettings
+import com.example.data.model.RoleInvite
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
 import com.example.data.model.VerifiedFileRecord
@@ -26,7 +25,6 @@ import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
-import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
@@ -35,7 +33,7 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
-import java.util.UUID
+import java.util.Locale
 
 class UniCoreRepository(
     private val db: FirebaseFirestore,
@@ -51,42 +49,56 @@ class UniCoreRepository(
         const val BOOTSTRAPPED_SUPER_ADMIN_EMAIL = "fvathyvhmed@gmail.com"
     }
 
-    private fun requireUserId(): String {
+    internal fun requireUserId(): String {
         return auth.currentUser?.uid?.takeIf { it.isNotBlank() }
             ?: throw IllegalStateException("User must be signed in with Google before accessing Firestore.")
     }
 
     /**
-     * Ensures user profile & private PII doc exist and resolves authoritative RBAC role.
+     * Ensures user profile, private PII, and any pending email-based role invite are synced
+     * cleanly in strict order before marking the invite CLAIMED.
      */
-    suspend fun ensureUserSessionProfile(): Result<UserRole> {
+    suspend fun ensureUserSessionProfile(governance: UniCoreGovernanceRepository): Result<UserRole> {
         val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Not authenticated"))
         val user = auth.currentUser!!
         return try {
             val today = ZeroCostQuotaManager.currentUtcDayKey()
+            val normalizedEmail = user.email?.trim()?.lowercase(Locale.ROOT)
             val isBootstrappedSuperAdmin =
-                user.email == BOOTSTRAPPED_SUPER_ADMIN_EMAIL && user.isEmailVerified
+                normalizedEmail == BOOTSTRAPPED_SUPER_ADMIN_EMAIL && user.isEmailVerified
 
-            // Check authoritative role registries
+            val pendingInvite: RoleInvite? = if (!normalizedEmail.isNullOrBlank() && user.isEmailVerified) {
+                runCatching {
+                    val snap = db.collection("role_invites").document(normalizedEmail).get().await()
+                    snap.toObject(RoleInvite::class.java)?.takeIf { it.status == "PENDING" }
+                }.getOrNull()
+            } else {
+                null
+            }
+
+            val hasSuperAdminDoc = runCatching {
+                db.collection("super_admins").document(uid).get().await().exists()
+            }.getOrDefault(false)
+
+            val hasAdminDoc = runCatching {
+                db.collection("admins").document(uid).get().await().exists()
+            }.getOrDefault(false)
+
+            val hasPendingAdminInvite = pendingInvite?.assignedRole == UserRole.ADMIN.name
+
             val resolvedRole = when {
-                isBootstrappedSuperAdmin -> UserRole.SUPER_ADMIN
-                runCatching {
-                    db.collection("super_admins").document(uid).get().await().exists()
-                }.getOrDefault(false) -> UserRole.SUPER_ADMIN
-                runCatching {
-                    db.collection("admins").document(uid).get().await().exists()
-                }.getOrDefault(false) -> UserRole.ADMIN
+                isBootstrappedSuperAdmin || hasSuperAdminDoc -> UserRole.SUPER_ADMIN
+                hasAdminDoc || hasPendingAdminInvite -> UserRole.ADMIN
                 else -> UserRole.STUDENT
             }
 
-            // Ensure bootstrapped Super Admin record & default settings exist
             if (isBootstrappedSuperAdmin) {
                 val superRef = db.collection("super_admins").document(uid)
                 if (!superRef.get().await().exists()) {
                     superRef.set(
                         mapOf(
                             "userId" to uid,
-                            "email" to (user.email ?: BOOTSTRAPPED_SUPER_ADMIN_EMAIL),
+                            "email" to (normalizedEmail ?: BOOTSTRAPPED_SUPER_ADMIN_EMAIL),
                             "createdAt" to FieldValue.serverTimestamp(),
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
@@ -109,20 +121,35 @@ class UniCoreRepository(
                 }
             }
 
+            // Step 1: If user has a PENDING ADMIN invite, create /admins/{uid} while invite is still PENDING
+            if (hasPendingAdminInvite && !hasAdminDoc && pendingInvite != null && !normalizedEmail.isNullOrBlank()) {
+                db.collection("admins").document(uid).set(
+                    mapOf(
+                        "userId" to uid,
+                        "email" to normalizedEmail,
+                        "grantedBy" to pendingInvite.invitedBy,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+
+            // Step 2: Create or update /users/{uid} (role promotion rule also requires PENDING invite)
             val userRef = db.collection("users").document(uid)
             val snap = userRef.get().await()
-            val cleanName = InputValidator.sanitizeText(user.displayName ?: "UniCore Learner")
+            val cleanName = InputValidator.sanitizeText(
+                user.displayName ?: pendingInvite?.displayNameHint ?: "UniCore Learner"
+            )
                 .take(60)
                 .ifBlank { "UniCore Learner" }
                 .let { if (it.length < 2) "Learner" else it }
 
             if (!snap.exists()) {
-                val initialRole = if (isBootstrappedSuperAdmin) UserRole.SUPER_ADMIN.name else UserRole.STUDENT.name
                 userRef.set(
                     mapOf(
                         "userId" to uid,
                         "displayName" to cleanName,
-                        "role" to initialRole,
+                        "role" to resolvedRole.name,
                         "aiCallsToday" to 0L,
                         "writesToday" to 0L,
                         "quotaDayKey" to today,
@@ -132,21 +159,39 @@ class UniCoreRepository(
                 ).await()
             } else {
                 val existingDay = snap.getString("quotaDayKey") ?: ""
+                val existingRole = snap.getString("role") ?: UserRole.STUDENT.name
+                val updates = mutableMapOf<String, Any>(
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
                 if (existingDay != today) {
-                    userRef.update(
+                    updates["aiCallsToday"] = 0L
+                    updates["writesToday"] = 0L
+                    updates["quotaDayKey"] = today
+                }
+                if (hasPendingAdminInvite && existingRole == UserRole.STUDENT.name) {
+                    updates["role"] = UserRole.ADMIN.name
+                }
+                if (updates.size > 1) {
+                    userRef.update(updates).await()
+                }
+            }
+
+            // Step 3: Mark invite CLAIMED after admin registry and profile are updated
+            if (pendingInvite != null && !normalizedEmail.isNullOrBlank()) {
+                runCatching {
+                    db.collection("role_invites").document(normalizedEmail).update(
                         mapOf(
-                            "aiCallsToday" to 0L,
-                            "writesToday" to 0L,
-                            "quotaDayKey" to today,
+                            "status" to "CLAIMED",
+                            "claimedByUid" to uid,
                             "updatedAt" to FieldValue.serverTimestamp()
                         )
                     ).await()
                 }
             }
 
-            // Store PII isolated in /users/{uid}/private/pii
+            // Step 4: Store PII isolated in /users/{uid}/private/pii
             val piiRef = userRef.collection("private").document("pii")
-            val email = (user.email ?: "unknown@unicore.edu").take(120)
+            val email = (normalizedEmail ?: "unknown@unicore.edu").take(120)
             if (!piiRef.get().await().exists()) {
                 piiRef.set(
                     mapOf(
@@ -158,7 +203,7 @@ class UniCoreRepository(
                 ).await()
             }
 
-            logAuditEvent(
+            governance.logAuditEvent(
                 action = "AUTH_SUCCESS",
                 severity = AuditSeverity.INFO,
                 targetPath = "users/$uid",
@@ -189,23 +234,6 @@ class UniCoreRepository(
         )
     }
 
-    fun observeSystemSettings(): Flow<SystemSettings> = flow {
-        val uid = requireUserId()
-        val path = "system_settings/global"
-        emitAll(
-            db.collection("system_settings").document("global")
-                .snapshots()
-                .map { snap ->
-                    snap.toObject(SystemSettings::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                        ?: SystemSettings()
-                }
-                .catch { error ->
-                    unwrapAndLog(error, OperationType.GET, path, uid)
-                    throw error
-                }
-        )
-    }
-
     fun observeCourses(isAdmin: Boolean): Flow<List<Course>> = flow {
         val uid = requireUserId()
         val path = "courses"
@@ -216,7 +244,10 @@ class UniCoreRepository(
         }
         emitAll(
             query.snapshots()
-                .map { snap -> snap.toObjects(Course::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+                .map { snap ->
+                    snap.toObjects(Course::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt?.seconds ?: Long.MAX_VALUE }
+                }
                 .catch { error ->
                     unwrapAndLog(error, OperationType.LIST, path, uid)
                     throw error
@@ -234,7 +265,10 @@ class UniCoreRepository(
         }
         emitAll(
             query.snapshots()
-                .map { snap -> snap.toObjects(Quiz::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+                .map { snap ->
+                    snap.toObjects(Quiz::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt?.seconds ?: Long.MAX_VALUE }
+                }
                 .catch { error ->
                     unwrapAndLog(error, OperationType.LIST, path, uid)
                     throw error
@@ -252,7 +286,10 @@ class UniCoreRepository(
         }
         emitAll(
             query.snapshots()
-                .map { snap -> snap.toObjects(QuizAttempt::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+                .map { snap ->
+                    snap.toObjects(QuizAttempt::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.updatedAt?.seconds ?: Long.MAX_VALUE }
+                }
                 .catch { error ->
                     unwrapAndLog(error, OperationType.LIST, path, uid)
                     throw error
@@ -267,37 +304,10 @@ class UniCoreRepository(
         emitAll(
             db.collection("users").document(userId).collection("files")
                 .snapshots()
-                .map { snap -> snap.toObjects(VerifiedFileRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
-                .catch { error ->
-                    unwrapAndLog(error, OperationType.LIST, path, uid)
-                    throw error
+                .map { snap ->
+                    snap.toObjects(VerifiedFileRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedByDescending { it.createdAt?.seconds ?: Long.MAX_VALUE }
                 }
-        )
-    }
-
-    fun observeAuditLogs(): Flow<List<AuditLog>> = flow {
-        val uid = requireUserId()
-        val path = "audit_logs"
-        emitAll(
-            db.collection(path)
-                .orderBy("createdAt", Query.Direction.DESCENDING)
-                .limit(50)
-                .snapshots()
-                .map { snap -> snap.toObjects(AuditLog::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
-                .catch { error ->
-                    unwrapAndLog(error, OperationType.LIST, path, uid)
-                    throw error
-                }
-        )
-    }
-
-    fun observeAdmins(): Flow<List<AdminRecord>> = flow {
-        val uid = requireUserId()
-        val path = "admins"
-        emitAll(
-            db.collection(path)
-                .snapshots()
-                .map { snap -> snap.toObjects(AdminRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
                 .catch { error ->
                     unwrapAndLog(error, OperationType.LIST, path, uid)
                     throw error
@@ -310,7 +320,8 @@ class UniCoreRepository(
         description: String,
         materialLink: String?,
         materialType: MaterialType,
-        published: Boolean
+        published: Boolean,
+        governance: UniCoreGovernanceRepository
     ): Result<Unit> {
         var docPath = "courses"
         return try {
@@ -349,6 +360,14 @@ class UniCoreRepository(
 
             docRef.set(payload).await()
             incrementDailyCounter(uid, isAi = false)
+            if (published) {
+                governance.sendNotification(
+                    title = cleanTitle,
+                    body = "$instructorName published new course material.",
+                    category = NotificationCategory.COURSE,
+                    targetUid = "ALL"
+                )
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -358,13 +377,28 @@ class UniCoreRepository(
         }
     }
 
+    suspend fun deleteCourse(courseId: String): Result<Unit> {
+        val docPath = "courses/$courseId"
+        return try {
+            requireUserId()
+            db.collection("courses").document(courseId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
     suspend fun createQuizWithAnswerKey(
         courseId: String,
         title: String,
         durationMinutes: Int,
-        questionPrompt: String,
-        options: List<String>,
-        correctOptionIndex: Int
+        questionPrompts: List<String>,
+        optionBlocks: List<String>,
+        correctOptionIndices: List<Int>,
+        governance: UniCoreGovernanceRepository
     ): Result<Unit> {
         var docPath = "quizzes"
         return try {
@@ -374,15 +408,26 @@ class UniCoreRepository(
                 is InputValidator.ValidationResult.Valid -> r.value
                 is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
             }
-            val cleanPrompt = when (val r = InputValidator.validateBoundedText(questionPrompt, "Question", 5, 250)) {
-                is InputValidator.ValidationResult.Valid -> r.value
-                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            val cleanPrompts = questionPrompts.mapNotNull { raw ->
+                when (val r = InputValidator.validateBoundedText(raw, "Question", 5, 250)) {
+                    is InputValidator.ValidationResult.Valid -> r.value
+                    is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+                }
             }
-            val cleanOptions = options.map { InputValidator.sanitizeText(it).take(80) }.filter { it.isNotBlank() }
-            if (cleanOptions.size < 2) {
-                return Result.failure(IllegalArgumentException("Provide at least 2 answer options."))
+            if (cleanPrompts.isEmpty() || cleanPrompts.size != optionBlocks.size || cleanPrompts.size != correctOptionIndices.size) {
+                return Result.failure(IllegalArgumentException("Provide at least 1 complete question."))
             }
-            val safeCorrectIdx = correctOptionIndex.coerceIn(0, cleanOptions.lastIndex).toLong()
+
+            val cleanOptionBlocks = optionBlocks.map { block ->
+                val opts = block.split("|").map { InputValidator.sanitizeText(it).take(80) }.filter { it.isNotBlank() }
+                if (opts.size < 2) return Result.failure(IllegalArgumentException("Each question needs at least 2 options."))
+                opts.joinToString("|")
+            }
+
+            val safeCorrect = correctOptionIndices.mapIndexed { i, idx ->
+                val count = cleanOptionBlocks[i].split("|").size
+                idx.coerceIn(0, (count - 1).coerceAtLeast(0)).toLong()
+            }
 
             val quizRef = db.collection("quizzes").document()
             docPath = quizRef.path
@@ -391,8 +436,8 @@ class UniCoreRepository(
                     "courseId" to courseId,
                     "title" to cleanTitle,
                     "durationMinutes" to durationMinutes.coerceIn(1, 180).toLong(),
-                    "questionPrompts" to listOf(cleanPrompt),
-                    "optionBlocks" to listOf(cleanOptions.joinToString("|")),
+                    "questionPrompts" to cleanPrompts,
+                    "optionBlocks" to cleanOptionBlocks,
                     "published" to true,
                     "createdBy" to uid,
                     "createdAt" to FieldValue.serverTimestamp(),
@@ -405,7 +450,7 @@ class UniCoreRepository(
             keyRef.set(
                 mapOf(
                     "quizId" to quizRef.id,
-                    "correctIndices" to listOf(safeCorrectIdx),
+                    "correctIndices" to safeCorrect,
                     "passingScore" to 70L,
                     "updatedBy" to uid,
                     "createdAt" to FieldValue.serverTimestamp(),
@@ -414,6 +459,12 @@ class UniCoreRepository(
             ).await()
 
             incrementDailyCounter(uid, isAi = false)
+            governance.sendNotification(
+                title = cleanTitle,
+                body = "New ${cleanPrompts.size}-question quiz published (${durationMinutes.coerceIn(1, 180)} min).",
+                category = NotificationCategory.QUIZ,
+                targetUid = "ALL"
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -423,10 +474,28 @@ class UniCoreRepository(
         }
     }
 
+    suspend fun deleteQuiz(quizId: String): Result<Unit> {
+        val docPath = "quizzes/$quizId"
+        return try {
+            requireUserId()
+            runCatching {
+                db.collection("quizzes").document(quizId).collection("private").document("answer_key").delete().await()
+            }
+            db.collection("quizzes").document(quizId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
     suspend fun submitQuizAttempt(
         quizId: String,
         quizTitle: String,
-        selectedIndices: List<Int>
+        selectedIndices: List<Int>,
+        governance: UniCoreGovernanceRepository
     ): Result<Unit> {
         var docPath = "quiz_attempts"
         return try {
@@ -453,11 +522,11 @@ class UniCoreRepository(
                 )
             ).await()
 
-            logAuditEvent(
+            governance.logAuditEvent(
                 action = "QUIZ_SUBMITTED",
                 severity = AuditSeverity.INFO,
                 targetPath = docPath,
-                details = "Student submitted quiz '$quizTitle' for server-verified grading."
+                details = "Student submitted quiz '$quizTitle' for verification."
             )
             incrementDailyCounter(uid, isAi = false)
             Result.success(Unit)
@@ -469,7 +538,10 @@ class UniCoreRepository(
         }
     }
 
-    suspend fun gradeQuizAttemptAsAdmin(attempt: QuizAttempt): Result<Int> {
+    suspend fun gradeQuizAttemptAsAdmin(
+        attempt: QuizAttempt,
+        governance: UniCoreGovernanceRepository
+    ): Result<Int> {
         val docPath = "quiz_attempts/${attempt.id}"
         return try {
             val uid = requireUserId()
@@ -498,11 +570,17 @@ class UniCoreRepository(
                 )
             ).await()
 
-            logAuditEvent(
+            governance.logAuditEvent(
                 action = "GRADE_FINALIZED",
                 severity = AuditSeverity.INFO,
                 targetPath = docPath,
                 details = "Admin finalized grade ($computedScore%) for student attempt."
+            )
+            governance.sendNotification(
+                title = attempt.quizTitle,
+                body = "Your quiz result is out: $computedScore%.",
+                category = NotificationCategory.GRADE,
+                targetUid = attempt.userId
             )
             Result.success(computedScore)
         } catch (e: CancellationException) {
@@ -513,7 +591,10 @@ class UniCoreRepository(
         }
     }
 
-    suspend fun recordVerifiedFile(validated: SecureFileValidator.ValidatedFile): Result<Unit> {
+    suspend fun recordVerifiedFile(
+        validated: SecureFileValidator.ValidatedFile,
+        governance: UniCoreGovernanceRepository
+    ): Result<Unit> {
         var docPath = "users/unknown/files"
         return try {
             val uid = requireUserId()
@@ -533,7 +614,7 @@ class UniCoreRepository(
                 )
             ).await()
 
-            logAuditEvent(
+            governance.logAuditEvent(
                 action = "FILE_UPLOAD_VERIFIED",
                 severity = AuditSeverity.INFO,
                 targetPath = docPath,
@@ -544,97 +625,6 @@ class UniCoreRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docPath)
-            Result.failure(e)
-        }
-    }
-
-    suspend fun updateSystemSettingsAsSuperAdmin(
-        dailyAiLimit: Long,
-        dailyWriteLimit: Long,
-        aiEnabled: Boolean,
-        zeroCostLockActive: Boolean
-    ): Result<Unit> {
-        val docPath = "system_settings/global"
-        return try {
-            val uid = requireUserId()
-            db.collection("system_settings").document("global").update(
-                mapOf(
-                    "dailyAiLimitPerUser" to dailyAiLimit.coerceIn(1L, 100L),
-                    "dailyWriteLimitPerUser" to dailyWriteLimit.coerceIn(10L, 500L),
-                    "aiEnabled" to aiEnabled,
-                    "zeroCostLockActive" to zeroCostLockActive,
-                    "updatedBy" to uid,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
-
-            logAuditEvent(
-                action = "SETTINGS_CHANGED",
-                severity = AuditSeverity.HIGH,
-                targetPath = docPath,
-                details = "Super Admin updated zero-cost settings: aiLimit=$dailyAiLimit, aiEnabled=$aiEnabled, lock=$zeroCostLockActive"
-            )
-            Result.success(Unit)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, docPath)
-            Result.failure(e)
-        }
-    }
-
-    suspend fun grantAdminRoleAsSuperAdmin(targetUid: String, targetEmail: String): Result<Unit> {
-        val cleanUid = when (val r = InputValidator.validateId(targetUid)) {
-            is InputValidator.ValidationResult.Valid -> r.value
-            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
-        }
-        val cleanEmail = when (val r = InputValidator.validateBoundedText(targetEmail, "Email", 3, 120)) {
-            is InputValidator.ValidationResult.Valid -> r.value
-            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
-        }
-        val docPath = "admins/$cleanUid"
-        return try {
-            val uid = requireUserId()
-            db.collection("admins").document(cleanUid).set(
-                mapOf(
-                    "userId" to cleanUid,
-                    "email" to cleanEmail,
-                    "grantedBy" to uid,
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
-            logAuditEvent(
-                action = "ROLE_CHANGED",
-                severity = AuditSeverity.HIGH,
-                targetPath = docPath,
-                details = "Super Admin granted ADMIN role to $cleanUid."
-            )
-            Result.success(Unit)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.CREATE, docPath)
-            Result.failure(e)
-        }
-    }
-
-    suspend fun revokeAdminRoleAsSuperAdmin(targetUid: String): Result<Unit> {
-        val docPath = "admins/$targetUid"
-        return try {
-            requireUserId()
-            db.collection("admins").document(targetUid).delete().await()
-            logAuditEvent(
-                action = "ROLE_CHANGED",
-                severity = AuditSeverity.HIGH,
-                targetPath = docPath,
-                details = "Super Admin revoked ADMIN role from $targetUid."
-            )
-            Result.success(Unit)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.DELETE, docPath)
             Result.failure(e)
         }
     }
@@ -661,54 +651,7 @@ class UniCoreRepository(
         }
     }
 
-    suspend fun logAuditEvent(
-        action: String,
-        severity: AuditSeverity,
-        targetPath: String,
-        details: String
-    ) {
-        val uid = auth.currentUser?.uid ?: return
-        val logId = "log_${UUID.randomUUID().toString().replace("-", "").take(20)}"
-        val docPath = "audit_logs/$logId"
-        val actorLabel = InputValidator.sanitizeText(
-            auth.currentUser?.displayName ?: auth.currentUser?.email ?: uid
-        ).take(80).ifBlank { uid }.let { if (it.length < 2) "user" else it }
-
-        try {
-            db.collection("audit_logs").document(logId).set(
-                mapOf(
-                    "actorUid" to uid,
-                    "actorLabel" to actorLabel,
-                    "action" to action,
-                    "severity" to severity.name,
-                    "targetPath" to targetPath.take(180).ifBlank { "unknown" },
-                    "details" to InputValidator.sanitizeText(details).take(400).ifBlank { "Security event" },
-                    "createdAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.CREATE, docPath)
-        }
-    }
-
-    /**
-     * Live server-side security verification probes triggered by Super Admin in the Security Console
-     * to prove Firestore Rules actually reject unauthorized writes/reads on the backend.
-     */
-    suspend fun runLiveSecurityProbe(targetPath: String, operation: suspend () -> Unit): Boolean {
-        return try {
-            operation()
-            false // Unexpectedly succeeded
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            true // Properly blocked by Firestore Security Rules!
-        }
-    }
-
-    private fun unwrapAndLog(
+    internal fun unwrapAndLog(
         error: Throwable,
         operationType: OperationType,
         path: String,

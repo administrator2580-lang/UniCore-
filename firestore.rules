@@ -50,6 +50,30 @@ service cloud.firestore {
       );
     }
 
+    function isVerifiedEmailUser() {
+      return isSignedIn() &&
+        ('email' in request.auth.token) &&
+        ('email_verified' in request.auth.token) &&
+        request.auth.token.email is string &&
+        request.auth.token.email.size() >= 3 &&
+        request.auth.token.email_verified == true;
+    }
+
+    function isValidEmailDocId(id) {
+      return id is string &&
+        id.size() >= 3 &&
+        id.size() <= 120 &&
+        id.matches('^[a-z0-9_.+-]+@[a-z0-9.-]+\\.[a-z]{2,}$');
+    }
+
+    function hasPendingAdminInvite() {
+      return isVerifiedEmailUser() &&
+        exists(/databases/$(database)/documents/role_invites/$(request.auth.token.email.lower())) &&
+        get(/databases/$(database)/documents/role_invites/$(request.auth.token.email.lower())).data.assignedRole == 'ADMIN' &&
+        get(/databases/$(database)/documents/role_invites/$(request.auth.token.email.lower())).data.status == 'PENDING' &&
+        get(/databases/$(database)/documents/role_invites/$(request.auth.token.email.lower())).data.email == request.auth.token.email.lower();
+    }
+
     function isValidTimestamp(ts) {
       return ts is timestamp && ts <= request.time;
     }
@@ -184,11 +208,35 @@ service cloud.firestore {
           'FILE_UPLOAD_REJECTED',
           'RATE_LIMIT_TRIGGERED',
           'QUOTA_WARNING',
-          'QUOTA_LOCKED'
+          'QUOTA_LOCKED',
+          'ACCOUNT_INVITED',
+          'NOTIFICATION_SENT'
         ] &&
         data.severity in ['INFO', 'WARN', 'HIGH', 'CRITICAL'] &&
         data.targetPath is string && data.targetPath.size() >= 1 && data.targetPath.size() <= 180 &&
         data.details is string && data.details.size() >= 1 && data.details.size() <= 400 &&
+        isValidTimestamp(data.createdAt);
+    }
+
+    function isValidRoleInvite(data) {
+      return data.email is string && isValidEmailDocId(data.email) &&
+        data.displayNameHint is string && data.displayNameHint.size() >= 2 && data.displayNameHint.size() <= 60 &&
+        data.assignedRole in ['STUDENT', 'ADMIN'] &&
+        data.invitedBy is string && isValidId(data.invitedBy) &&
+        data.invitedByLabel is string && data.invitedByLabel.size() >= 2 && data.invitedByLabel.size() <= 80 &&
+        data.status in ['PENDING', 'CLAIMED'] &&
+        (!('claimedByUid' in data) || (data.claimedByUid is string && isValidId(data.claimedByUid))) &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidNotification(data) {
+      return data.title is string && data.title.size() >= 2 && data.title.size() <= 100 &&
+        data.body is string && data.body.size() >= 2 && data.body.size() <= 400 &&
+        data.category in ['COURSE', 'QUIZ', 'GRADE', 'ROLE', 'SECURITY', 'ANNOUNCEMENT'] &&
+        data.targetUid is string && (data.targetUid == 'ALL' || isValidId(data.targetUid)) &&
+        data.senderUid is string && isValidId(data.senderUid) &&
+        data.senderName is string && data.senderName.size() >= 2 && data.senderName.size() <= 60 &&
         isValidTimestamp(data.createdAt);
     }
 
@@ -210,13 +258,16 @@ service cloud.firestore {
     match /admins/{userId} {
       allow get: if isValidId(userId) && isAdmin();
       allow list: if isAdmin();
-      allow create: if isSuperAdmin() &&
-        isValidId(userId) &&
+      allow create: if isValidId(userId) &&
         incoming().userId == userId &&
-        incoming().grantedBy == request.auth.uid &&
         incoming().keys().hasAll(['userId', 'email', 'grantedBy', 'createdAt', 'updatedAt']) &&
         incoming().keys().hasOnly(['userId', 'email', 'grantedBy', 'createdAt', 'updatedAt']) &&
-        isValidAdminGrant(incoming());
+        isValidAdminGrant(incoming()) && (
+          (isSuperAdmin() && incoming().grantedBy == request.auth.uid) ||
+          (isOwner(userId) && hasPendingAdminInvite() &&
+           incoming().email.lower() == request.auth.token.email.lower() &&
+           incoming().grantedBy == get(/databases/$(database)/documents/role_invites/$(request.auth.token.email.lower())).data.invitedBy)
+        );
       allow update: if false;
       allow delete: if isValidId(userId) && isSuperAdmin();
     }
@@ -255,7 +306,11 @@ service cloud.firestore {
         isValidId(userId) &&
         isOwner(userId) &&
         incoming().userId == request.auth.uid &&
-        (incoming().role == 'STUDENT' || (incoming().role == 'SUPER_ADMIN' && isBootstrappedSuperAdmin())) &&
+        (
+          incoming().role == 'STUDENT' ||
+          (incoming().role == 'SUPER_ADMIN' && isBootstrappedSuperAdmin()) ||
+          (incoming().role == 'ADMIN' && (isAdmin() || hasPendingAdminInvite()))
+        ) &&
         incoming().aiCallsToday == 0 &&
         incoming().writesToday == 0 &&
         incoming().keys().hasAll([
@@ -272,9 +327,12 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt && (
           (
             isOwner(userId) &&
-            incoming().role == existing().role &&
+            (
+              incoming().role == existing().role ||
+              (existing().role == 'STUDENT' && incoming().role == 'ADMIN' && hasPendingAdminInvite())
+            ) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'updatedAt'
+              'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'updatedAt'
             ])
           ) || (
             isSuperAdmin() &&
@@ -447,6 +505,73 @@ service cloud.firestore {
         ]) &&
         isValidAuditLog(incoming());
       allow update, delete: if false;
+    }
+
+    match /role_invites/{inviteId} {
+      allow get: if isValidEmailDocId(inviteId) && (
+        isAdmin() ||
+        (isVerifiedEmailUser() && request.auth.token.email.lower() == inviteId)
+      );
+      allow list: if isAdmin();
+      allow create: if isAdmin() &&
+        isValidEmailDocId(inviteId) &&
+        incoming().email == inviteId &&
+        incoming().invitedBy == request.auth.uid &&
+        incoming().status == 'PENDING' &&
+        !('claimedByUid' in incoming()) &&
+        (incoming().assignedRole == 'STUDENT' || (incoming().assignedRole == 'ADMIN' && isSuperAdmin())) &&
+        incoming().keys().hasAll([
+          'email', 'displayNameHint', 'assignedRole', 'invitedBy', 'invitedByLabel', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'email', 'displayNameHint', 'assignedRole', 'invitedBy', 'invitedByLabel', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidRoleInvite(incoming());
+      allow update: if isValidEmailDocId(inviteId) &&
+        isValidRoleInvite(incoming()) &&
+        incoming().email == existing().email &&
+        incoming().invitedBy == existing().invitedBy &&
+        incoming().createdAt == existing().createdAt && (
+          isSuperAdmin() ||
+          (
+            isVerifiedEmailUser() &&
+            request.auth.token.email.lower() == inviteId &&
+            existing().status == 'PENDING' &&
+            incoming().status == 'CLAIMED' &&
+            incoming().claimedByUid == request.auth.uid &&
+            incoming().assignedRole == existing().assignedRole &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'claimedByUid', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidEmailDocId(inviteId) && (
+        isSuperAdmin() ||
+        (isAdmin() && existing().assignedRole == 'STUDENT')
+      );
+    }
+
+    match /notifications/{notificationId} {
+      allow get: if isSignedIn() && isValidId(notificationId) && (
+        existing().targetUid == 'ALL' ||
+        existing().targetUid == request.auth.uid ||
+        isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.targetUid == 'ALL' ||
+        resource.data.targetUid == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isAdmin() &&
+        isValidId(notificationId) &&
+        incoming().senderUid == request.auth.uid &&
+        incoming().keys().hasAll([
+          'title', 'body', 'category', 'targetUid', 'senderUid', 'senderName', 'createdAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'title', 'body', 'category', 'targetUid', 'senderUid', 'senderName', 'createdAt'
+        ]) &&
+        isValidNotification(incoming());
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(notificationId);
     }
   }
 }

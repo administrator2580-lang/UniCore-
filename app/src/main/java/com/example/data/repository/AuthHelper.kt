@@ -9,6 +9,10 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.GetCredentialProviderConfigurationException
+import androidx.credentials.exceptions.GetCredentialUnsupportedException
+import androidx.credentials.exceptions.NoCredentialException
 import com.example.security.InputValidator
 import com.example.security.RateLimiter
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
@@ -17,6 +21,7 @@ import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthException
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
@@ -130,6 +135,37 @@ fun onGoogleSignInClicked(
         } catch (e: GetCredentialCancellationException) {
             Log.w("Auth", "Google Sign-In flow cancelled or dismissed: ${e.message}", e)
             onAuthCancelled()
+        } catch (e: NoCredentialException) {
+            Log.e("Auth", "NoCredentialException during Google Sign-In", e)
+            onAuthError(
+                "No Google credential available. Check: 1) Google account is signed in on phone, 2) Both SHA-1 & SHA-256 are saved in Firebase Console, 3) Wait ~5 min for sync."
+            )
+        } catch (e: GetCredentialProviderConfigurationException) {
+            Log.e("Auth", "Provider configuration error", e)
+            onAuthError("Google Play Services Credential Provider unavailable or outdated on device.")
+        } catch (e: GetCredentialUnsupportedException) {
+            Log.e("Auth", "Credential Manager unsupported", e)
+            onAuthError("Google Credential Manager is not supported on this device.")
+        } catch (e: GetCredentialException) {
+            Log.e("Auth", "Credential error (${e.type})", e)
+            val msg = e.message.orEmpty()
+            val friendly = if (msg.contains("28444") || msg.contains("Developer console", ignoreCase = true)) {
+                "OAuth config mismatch (28444): verify SHA-1/SHA-256 for com.aistudio.unicore.kxmpzq and enable Google Sign-In in Firebase Auth."
+            } else {
+                "Google Sign-In error (${e.type.substringAfterLast('.')})."
+            }
+            onAuthError(friendly)
+        } catch (e: FirebaseAuthException) {
+            Log.e("Auth", "FirebaseAuthException (${e.errorCode})", e)
+            val friendly = when (e.errorCode) {
+                "ERROR_OPERATION_NOT_ALLOWED" ->
+                    "Google Sign-In is disabled in Firebase Console -> Authentication -> Sign-in method."
+                "ERROR_USER_DISABLED" ->
+                    "This account has been disabled."
+                else ->
+                    "Firebase Auth error (${e.errorCode})."
+            }
+            onAuthError(friendly)
         } catch (e: Exception) {
             Log.e("Auth", "Google Sign-In failed", e)
             onAuthError(InputValidator.safeUserErrorMessage(e, "Google Sign-In failed. Please try again."))

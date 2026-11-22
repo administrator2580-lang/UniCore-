@@ -1,6 +1,5 @@
 package com.example.security
 
-import com.example.BuildConfig
 import java.net.URI
 
 /**
@@ -98,32 +97,41 @@ object InputValidator {
     }
 
     /**
-     * Masks internal stack traces, Firestore collection paths, and sensitive tokens in UI errors.
+     * Masks internal stack traces, Firestore collection paths, and sensitive tokens in UI errors
+     * while preserving actionable root-cause categories (e.g., App Check, Quota, Network).
      */
     fun safeUserErrorMessage(error: Throwable?, fallback: String = "Operation could not be completed."): String {
-        val msg = error?.localizedMessage ?: return fallback
-        if (BuildConfig.DEBUG) {
-            // Even in debug UI, avoid dumping raw internal stack traces to end-user banners
-            if (msg.contains("PERMISSION_DENIED", ignoreCase = true)) {
-                return "Access denied by server security rules."
-            }
-            if (msg.contains("Quota exceeded", ignoreCase = true) ||
-                msg.contains("RESOURCE_EXHAUSTED", ignoreCase = true)
-            ) {
-                return "Free-tier quota reached. Feature paused safely to maintain zero cost."
-            }
-        }
+        val msg = generateSequence(error) { it.cause }
+            .mapNotNull { it.localizedMessage ?: it.message }
+            .joinToString(" | ")
+            .ifBlank { return fallback }
+
         return when {
+            msg.contains("App Check", ignoreCase = true) ||
+                msg.contains("appcheck", ignoreCase = true) ||
+                msg.contains("attestation", ignoreCase = true) ||
+                msg.contains("403") ->
+                "App Check attestation failed (403). Debug APKs on a phone require an App Check debug token or unenforced AI Logic in Firebase Console."
             msg.contains("PERMISSION_DENIED", ignoreCase = true) ->
                 "Access denied: insufficient permissions for this action."
             msg.contains("UNAUTHENTICATED", ignoreCase = true) ->
                 "Please sign in again to continue."
             msg.contains("Quota", ignoreCase = true) ||
-                msg.contains("RESOURCE_EXHAUSTED", ignoreCase = true) ->
-                "Free-tier daily limit reached. Paused safely with zero charges."
+                msg.contains("RESOURCE_EXHAUSTED", ignoreCase = true) ||
+                msg.contains("429") ->
+                "Free-tier daily limit or rate limit reached. Please retry shortly."
+            msg.contains("404") ||
+                msg.contains("not found", ignoreCase = true) ||
+                msg.contains("API has not been used", ignoreCase = true) ->
+                "AI service or model endpoint is not enabled yet for this Firebase project."
+            msg.contains("blocked", ignoreCase = true) ||
+                msg.contains("SAFETY", ignoreCase = true) ->
+                "Response was filtered for safety. Try rephrasing your study question."
             msg.contains("network", ignoreCase = true) ||
+                msg.contains("Unable to resolve host", ignoreCase = true) ||
+                msg.contains("timeout", ignoreCase = true) ||
                 msg.contains("unavailable", ignoreCase = true) ->
-                "Network unavailable. Check your HTTPS connection and retry."
+                "Network unavailable. Check your internet connection and retry."
             else -> fallback
         }
     }
