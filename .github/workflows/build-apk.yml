@@ -136,11 +136,35 @@ jobs:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
-          CLEAN_B64="$(printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n\t ')"
-          if ! printf '%s' "$CLEAN_B64" | base64 -d > "${{ github.workspace }}/my-upload-key.jks"; then
-            echo "::error::RELEASE_KEYSTORE_BASE64 is not valid Base64. Re-copy only the Base64 file contents (no extra labels or spaces) or delete the secret if you only need the Debug APK."
-            exit 1
-          fi
+          python3 - <<'PY'
+          import base64, os, re, sys
+
+          raw = os.environ.get("RELEASE_KEYSTORE_BASE64", "")
+          cleaned = re.sub(r"\s+", "", raw)
+          if not cleaned:
+              print("::error::RELEASE_KEYSTORE_BASE64 is empty.")
+              sys.exit(1)
+
+          if ":" in cleaned or "SHA1" in cleaned or "SHA256" in cleaned:
+              print(f"::error::RELEASE_KEYSTORE_BASE64 looks like a SHA fingerprint or text label (length={len(cleaned)}), not the Base64 keystore (~2800+ chars from key.txt).")
+              sys.exit(1)
+
+          if len(cleaned) < 500:
+              print(f"::error::RELEASE_KEYSTORE_BASE64 is too short (length={len(cleaned)} chars). A JKS keystore in Base64 is ~2800-3500 chars.")
+              sys.exit(1)
+
+          cleaned += "=" * (-len(cleaned) % 4)
+          try:
+              data = base64.b64decode(cleaned, validate=True)
+          except Exception as exc:
+              print(f"::error::RELEASE_KEYSTORE_BASE64 is not valid Base64 (length={len(cleaned)}): {exc}")
+              sys.exit(1)
+
+          out_path = os.path.join(os.environ["GITHUB_WORKSPACE"], "my-upload-key.jks")
+          with open(out_path, "wb") as f:
+              f.write(data)
+          print(f"Decoded my-upload-key.jks ({len(data)} bytes).")
+          PY
           echo "Release APK SHA fingerprints (add SHA1 in Firebase Project Settings for Google Sign-In):"
           keytool -list -v -keystore "${{ github.workspace }}/my-upload-key.jks" -storepass "$STORE_PASSWORD" -alias upload | grep -E "SHA1:|SHA256:"
 
