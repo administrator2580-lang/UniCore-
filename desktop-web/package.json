@@ -32,17 +32,17 @@
     "asar": true,
     "directories": {
       "output": "release",
-      "buildResources": "build"
+      "buildResources": "resources"
     },
     "files": [
       "dist/**/*",
-      "build/icon.png",
+      "resources/icon.png",
       "main.js",
       "preload.js",
       "package.json"
     ],
     "win": {
-      "icon": "build/icon.ico",
+      "icon": "resources/icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -56,19 +56,22 @@
             "x64"
           ]
         }
-      ],
-      "artifactName": "UniCore-${version}-${arch}-${target}.${ext}"
+      ]
     },
     "nsis": {
+      "artifactName": "UniCore-Setup-${version}-${arch}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "UniCore",
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico",
-      "installerHeaderIcon": "build/icon.ico"
+      "installerIcon": "resources/icon.ico",
+      "uninstallerIcon": "resources/icon.ico",
+      "installerHeaderIcon": "resources/icon.ico"
+    },
+    "portable": {
+      "artifactName": "UniCore-Portable-${version}-${arch}.${ext}"
     }
   }
 }

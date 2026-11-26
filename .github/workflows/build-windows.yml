@@ -65,6 +65,22 @@ jobs:
           VITE_FIREBASE_DATABASE_ID: ${{ secrets.VITE_FIREBASE_DATABASE_ID }}
         run: npm run build
 
+      - name: Ensure Windows app icon exists
+        shell: bash
+        run: |
+          mkdir -p desktop-web/resources
+          if [ ! -s desktop-web/resources/icon.ico ]; then
+            SRC="app/src/main/res/drawable/ic_unicore_emblem_1795374197204.jpg"
+            if [ ! -f "$SRC" ]; then
+              SRC="desktop-web/public/assets/icon.png"
+            fi
+            if command -v magick >/dev/null 2>&1 && [ -f "$SRC" ]; then
+              magick "$SRC" -resize 512x512 desktop-web/resources/icon.png
+              magick desktop-web/resources/icon.png -define icon:auto-resize=256,128,64,48,32,16 desktop-web/resources/icon.ico
+              echo "Generated desktop-web/resources/icon.ico from $SRC"
+            fi
+          fi
+
       - name: Package Windows EXE (NSIS Installer & Portable)
         shell: bash
         working-directory: desktop-web

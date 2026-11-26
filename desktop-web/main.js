@@ -509,7 +509,7 @@ async function createWindow() {
 
   const iconCandidates = [
     path.join(__dirname, 'dist', 'assets', 'icon.png'),
-    path.join(__dirname, 'build', 'icon.png')
+    path.join(__dirname, 'resources', 'icon.png')
   ];
   const iconPath = iconCandidates.find((p) => fs.existsSync(p));
   mainWindow = new BrowserWindow({
