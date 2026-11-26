@@ -2,6 +2,7 @@ import { deleteApp, getApps, initializeApp } from 'firebase/app';
 import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 import {
   browserLocalPersistence,
+  browserPopupRedirectResolver,
   getAuth,
   GoogleAuthProvider,
   indexedDBLocalPersistence,
@@ -30,20 +31,21 @@ export function getFirebaseRuntimeConfig() {
   } catch {
     override = {};
   }
-  const projectId = override.projectId || BUILD_DEFAULTS.projectId || 'gen-lang-client-0870704520';
+  const projectId = String(override.projectId || BUILD_DEFAULTS.projectId || 'gen-lang-client-0870704520').trim();
   return {
-    apiKey: override.apiKey || BUILD_DEFAULTS.apiKey || '',
-    authDomain: override.authDomain || BUILD_DEFAULTS.authDomain || `${projectId}.firebaseapp.com`,
+    apiKey: String(override.apiKey || BUILD_DEFAULTS.apiKey || '').trim(),
+    authDomain: String(override.authDomain || BUILD_DEFAULTS.authDomain || `${projectId}.firebaseapp.com`).trim(),
     projectId,
-    storageBucket: override.storageBucket || BUILD_DEFAULTS.storageBucket || `${projectId}.firebasestorage.app`,
-    messagingSenderId: override.messagingSenderId || BUILD_DEFAULTS.messagingSenderId || '324526157499',
-    appId: override.appId || BUILD_DEFAULTS.appId || '',
-    firestoreDatabaseId:
+    storageBucket: String(override.storageBucket || BUILD_DEFAULTS.storageBucket || `${projectId}.firebasestorage.app`).trim(),
+    messagingSenderId: String(override.messagingSenderId || BUILD_DEFAULTS.messagingSenderId || '324526157499').trim(),
+    appId: String(override.appId || BUILD_DEFAULTS.appId || '').trim(),
+    firestoreDatabaseId: String(
       override.firestoreDatabaseId ||
       BUILD_DEFAULTS.firestoreDatabaseId ||
-      'ai-studio-android-unicore-9b169dd7-0f78-40f7-9411-0587832d12de',
-    webRecaptchaKey: override.webRecaptchaKey || BUILD_DEFAULTS.webRecaptchaKey || '',
-    appCheckDebugToken: override.appCheckDebugToken || BUILD_DEFAULTS.appCheckDebugToken || ''
+      'ai-studio-android-unicore-9b169dd7-0f78-40f7-9411-0587832d12de'
+    ).trim(),
+    webRecaptchaKey: String(override.webRecaptchaKey || BUILD_DEFAULTS.webRecaptchaKey || '').trim(),
+    appCheckDebugToken: String(override.appCheckDebugToken || BUILD_DEFAULTS.appCheckDebugToken || '').trim()
   };
 }
 
@@ -96,7 +98,8 @@ export function getFirebaseClients() {
   let auth;
   try {
     auth = initializeAuth(app, {
-      persistence: [indexedDBLocalPersistence, browserLocalPersistence]
+      persistence: [indexedDBLocalPersistence, browserLocalPersistence],
+      popupRedirectResolver: browserPopupRedirectResolver
     });
   } catch {
     auth = getAuth(app);
@@ -131,10 +134,10 @@ export async function signInWithGoogleUnified(auth) {
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: 'select_account' });
   try {
-    return await signInWithPopup(auth, provider);
+    return await signInWithPopup(auth, provider, browserPopupRedirectResolver);
   } catch (err) {
     if (err?.code === 'auth/popup-blocked') {
-      await signInWithRedirect(auth, provider);
+      await signInWithRedirect(auth, provider, browserPopupRedirectResolver);
       return null;
     }
     throw err;
@@ -155,6 +158,8 @@ export function formatAuthError(err) {
       const host = typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname : 'localhost';
       return `النطاق (${host}) غير مضاف في Firebase Console -> Authentication -> Settings -> Authorized domains. أضف "${host}" ثم أعد المحاولة.`;
     }
+    case 'auth/argument-error':
+      return 'تعذر فتح نافذة تسجيل الدخول بـ Google بسبب إعدادات المصادقة أو النافذة المنبثقة. أعد المحاولة أو حدّث البرنامج.';
     case 'auth/operation-not-allowed':
       return 'تسجيل الدخول بـ Google غير مفعّل في Firebase Authentication -> Sign-in method.';
     case 'auth/user-disabled':

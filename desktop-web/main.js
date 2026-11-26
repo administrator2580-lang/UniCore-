@@ -672,6 +672,21 @@ async function createWindow() {
 
   // Allow Firebase Auth / Google Sign-In popup flows, send all other links to default OS browser
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url === 'about:blank') {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 520,
+          height: 680,
+          autoHideMenuBar: true,
+          webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true
+          }
+        }
+      };
+    }
     const parsed = validateHttpsUrl(url);
     if (!parsed) return { action: 'deny' };
     const host = parsed.hostname.toLowerCase();
