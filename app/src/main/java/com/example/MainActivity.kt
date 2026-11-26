@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.FolderSpecial
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
@@ -56,6 +57,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -67,8 +69,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -94,10 +98,12 @@ import com.example.ui.i18n.stringsFor
 import com.example.ui.screens.AiTutorScreen
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CoursesScreen
+import com.example.ui.screens.InAppFilePreviewDialog
 import com.example.ui.screens.NotificationsSheet
 import com.example.ui.screens.QuizzesScreen
 import com.example.ui.screens.SecureFilesVaultScreen
 import com.example.ui.screens.SecurityConsoleScreen
+import com.example.ui.screens.StudyChatScreen
 import com.example.ui.theme.UniCoreTheme
 import com.example.ui.viewmodel.UiState
 import com.example.ui.viewmodel.UniCoreViewModel
@@ -105,6 +111,10 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -148,6 +158,7 @@ private enum class UniCoreTab(
 ) {
     COURSES(Icons.Default.School, "tab_courses"),
     QUIZZES(Icons.Default.Quiz, "tab_quizzes"),
+    CHAT(Icons.Default.Forum, "tab_chat"),
     AI_TUTOR(Icons.Default.AutoAwesome, "tab_ai_tutor"),
     VAULT(Icons.Default.FolderSpecial, "tab_vault"),
     ACCOUNT(Icons.Default.Person, "tab_security");
@@ -155,6 +166,7 @@ private enum class UniCoreTab(
     fun label(strings: UniCoreStrings): String = when (this) {
         COURSES -> strings.navCourses
         QUIZZES -> strings.navQuizzes
+        CHAT -> strings.navChat
         AI_TUTOR -> strings.navTutor
         VAULT -> strings.navFiles
         ACCOUNT -> strings.navAccount
@@ -276,11 +288,39 @@ private fun UniCoreAuthenticatedShell(
     val auditLogsState by viewModel.auditLogsState.collectAsStateWithLifecycle()
     val aiUiState by viewModel.aiUiState.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
+    val inAppPreviewFile by viewModel.inAppPreviewFile.collectAsStateWithLifecycle()
+    val selectedChatRoomId by viewModel.selectedChatRoomId.collectAsStateWithLifecycle()
+    val chatMessagesState by viewModel.chatMessagesState.collectAsStateWithLifecycle()
+
+    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(userProfile?.banUntilMillis) {
+        val until = userProfile?.banUntilMillis ?: 0L
+        nowMillis = System.currentTimeMillis()
+        while (until > System.currentTimeMillis()) {
+            delay(10_000L)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
 
     if (userProfile?.accountDisabled == true && userRole != UserRole.SUPER_ADMIN) {
         AccountSuspendedGate(
             title = strings.accountSuspendedTitle,
             body = strings.accountSuspendedBody,
+            signOutLabel = strings.signOutAction,
+            onSignOut = { signOut(credentialManager, scope) }
+        )
+        return
+    }
+
+    val banUntil = userProfile?.banUntilMillis ?: 0L
+    if (banUntil > nowMillis && userRole != UserRole.SUPER_ADMIN) {
+        val unlockTimeStr = remember(banUntil) {
+            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(banUntil))
+        }
+        val reasonLine = userProfile?.banReason?.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty()
+        AccountSuspendedGate(
+            title = strings.bannedUntilTitle,
+            body = "${strings.bannedUntilBody} $unlockTimeStr$reasonLine",
             signOutLabel = strings.signOutAction,
             onSignOut = { signOut(credentialManager, scope) }
         )
@@ -414,7 +454,15 @@ private fun UniCoreAuthenticatedShell(
                                         contentDescription = label
                                     )
                                 },
-                                label = { Text(label, maxLines = 1) },
+                                label = {
+                                    Text(
+                                        text = label,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        fontSize = 11.sp,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
                                 modifier = Modifier.testTag(tab.testTag)
                             )
                         }
@@ -484,14 +532,50 @@ private fun UniCoreAuthenticatedShell(
                                 }
                             )
                             UniCoreTab.QUIZZES -> QuizzesScreen(
+                                currentUserId = currentUserId,
                                 quizzesState = quizzesState,
                                 attemptsState = attemptsState,
                                 coursesState = coursesState,
                                 userRole = userRole,
-                                onCreateQuiz = viewModel::createQuiz,
+                                onCreateQuiz = { courseId, title, duration, startMs, endMs, imageUri, prompts, blocks, corrects ->
+                                    viewModel.createQuiz(
+                                        context = context,
+                                        courseId = courseId,
+                                        title = title,
+                                        durationMinutes = duration,
+                                        startAtMillis = startMs,
+                                        endAtMillis = endMs,
+                                        quizImageUri = imageUri,
+                                        questionPrompts = prompts,
+                                        optionBlocks = blocks,
+                                        correctIndices = corrects
+                                    )
+                                },
                                 onDeleteQuiz = viewModel::deleteQuiz,
                                 onSubmitAttempt = viewModel::submitQuizAttempt,
-                                onGradeAttempt = viewModel::gradeAttemptAsAdmin
+                                onCancelForViolation = viewModel::cancelQuizForViolation,
+                                onResetCancelledAttempt = viewModel::resetCancelledAttempt,
+                                onGradeAttempt = viewModel::gradeAttemptAsAdmin,
+                                onLoadQuizImage = viewModel::fetchQuizImageBytes
+                            )
+                            UniCoreTab.CHAT -> StudyChatScreen(
+                                currentUserId = currentUserId,
+                                userRole = userRole,
+                                departmentsState = departmentsState,
+                                selectedRoomId = selectedChatRoomId,
+                                messagesState = chatMessagesState,
+                                onSelectRoom = viewModel::selectChatRoom,
+                                onSendMessage = { roomId, deptName, yearLabel, text, imageUri ->
+                                    viewModel.sendChatMessage(
+                                        context = context,
+                                        roomId = roomId,
+                                        departmentName = deptName,
+                                        academicYear = yearLabel,
+                                        rawText = text,
+                                        imageUri = imageUri
+                                    )
+                                },
+                                onDeleteMessage = viewModel::deleteChatMessage
                             )
                             UniCoreTab.AI_TUTOR -> AiTutorScreen(
                                 aiState = aiUiState,
@@ -502,7 +586,8 @@ private fun UniCoreAuthenticatedShell(
                             )
                             UniCoreTab.VAULT -> SecureFilesVaultScreen(
                                 filesState = filesState,
-                                onFilePicked = { uri -> viewModel.validateAndStoreFile(context, uri) }
+                                onFilePicked = { uri -> viewModel.validateAndStoreFile(context, uri) },
+                                onDeleteFile = { record -> viewModel.deleteVerifiedFile(context, record) }
                             )
                             UniCoreTab.ACCOUNT -> SecurityConsoleScreen(
                                 currentUserId = currentUserId,
@@ -529,8 +614,13 @@ private fun UniCoreAuthenticatedShell(
                                 onPromoteUser = viewModel::promoteUserToAdmin,
                                 onDemoteAdmin = viewModel::demoteAdminToStudent,
                                 onToggleAccountDisabled = viewModel::setUserAccountDisabled,
-                                onSendSupportMessage = viewModel::sendSupportMessage,
-                                onReplySupportMessage = viewModel::replyToSupportMessage,
+                                onTimedBanUser = viewModel::setUserTimedBan,
+                                onSendSupportMessage = { subject, body, imageUri ->
+                                    viewModel.sendSupportMessage(context, subject, body, imageUri)
+                                },
+                                onReplySupportMessage = { msg, reply, imageUri ->
+                                    viewModel.replyToSupportMessage(context, msg, reply, imageUri)
+                                },
                                 onUpdateSettings = viewModel::updateSystemSettings,
                                 onSignOut = { signOut(credentialManager, scope) }
                             )
@@ -539,6 +629,15 @@ private fun UniCoreAuthenticatedShell(
                 }
             }
         }
+    }
+
+    val activePreview = inAppPreviewFile
+    if (activePreview != null) {
+        InAppFilePreviewDialog(
+            preview = activePreview,
+            onDismiss = viewModel::dismissInAppPreview,
+            onOpenExternal = { viewModel.openPreviewWithExternalApp(context, activePreview) }
+        )
     }
 
     if (showNotificationsSheet) {

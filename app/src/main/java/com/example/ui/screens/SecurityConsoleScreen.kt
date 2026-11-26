@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -89,8 +90,9 @@ fun SecurityConsoleScreen(
     onPromoteUser: (UserProfile) -> Unit,
     onDemoteAdmin: (String) -> Unit,
     onToggleAccountDisabled: (UserProfile, Boolean) -> Unit,
-    onSendSupportMessage: (String, String) -> Unit,
-    onReplySupportMessage: (SupportMessage, String) -> Unit,
+    onTimedBanUser: (UserProfile, Long, String) -> Unit,
+    onSendSupportMessage: (String, String, Uri?) -> Unit,
+    onReplySupportMessage: (SupportMessage, String, Uri?) -> Unit,
     onUpdateSettings: (Long, Long, Boolean, Boolean) -> Unit,
     onSignOut: () -> Unit
 ) {
@@ -366,7 +368,8 @@ fun SecurityConsoleScreen(
                     onRevokeInvite = onRevokeInvite,
                     onPromoteUser = onPromoteUser,
                     onDemoteAdmin = onDemoteAdmin,
-                    onToggleAccountDisabled = onToggleAccountDisabled
+                    onToggleAccountDisabled = onToggleAccountDisabled,
+                    onTimedBanUser = onTimedBanUser
                 )
             }
         }

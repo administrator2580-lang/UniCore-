@@ -43,6 +43,20 @@ export async function loadVaultBlob(sha256Hex) {
   }
 }
 
+export async function removeVaultBlob(sha256Hex) {
+  try {
+    const db = await openVaultDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).delete(sha256Hex);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // Non-fatal
+  }
+}
+
 export function triggerBrowserFileOpen(bytes, mimeType, fileName) {
   const blob = new Blob([bytes], { type: mimeType || 'application/octet-stream' });
   const url = URL.createObjectURL(blob);

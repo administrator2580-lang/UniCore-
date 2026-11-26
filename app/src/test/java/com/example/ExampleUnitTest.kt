@@ -1,6 +1,7 @@
 package com.example
 
 import com.example.data.model.DriveFolderLink
+import com.example.data.repository.AiTutorRepository
 import com.example.data.repository.GoogleDriveSyncRepository
 import org.junit.Assert.*
 import org.junit.Test
@@ -60,6 +61,45 @@ class ExampleUnitTest {
 
     val quotedHeader = "attachment; filename=\"Solar_Cells_Sheet.pdf\""
     assertEquals("Solar_Cells_Sheet.pdf", repo.extractFileNameFromContentDisposition(quotedHeader))
+  }
+
+  @Test
+  fun extractConfirmDownloadUrl_parsesDriveVirusScanForm() {
+    val repo = GoogleDriveSyncRepository()
+    val html = """
+      <html><body>
+        <form id="download-form" action="https://drive.usercontent.google.com/download" method="get">
+          <input type="hidden" name="id" value="1AbCDefFileId">
+          <input type="hidden" name="confirm" value="t">
+          <input type="hidden" name="uuid" value="abc-123">
+        </form>
+      </body></html>
+    """.trimIndent()
+    val resolved = repo.extractConfirmDownloadUrl(html, "https://drive.google.com/uc?id=1AbCDefFileId")
+    assertNotNull(resolved)
+    assertTrue(resolved!!.contains("id=1AbCDefFileId"))
+    assertTrue(resolved.contains("confirm=t"))
+    assertTrue(resolved.contains("uuid=abc-123"))
+  }
+
+  @Test
+  fun formatReadableTutorOutput_removesLatexAndMarkdownClutter() {
+    val raw = """
+      ### **السؤال الأول: إيجاد الجهد**
+      * المقاومة (${'$'}R = 50\ \Omega${'$'}) والتيار (${'$'}${'$'}2\text{ A}${'$'}${'$'}).
+      احسب ${'$'}V = I \times R${'$'} وكذلك \frac{120}{40} = 3.
+    """.trimIndent()
+
+    val cleaned = AiTutorRepository.formatReadableTutorOutput(raw)
+    assertFalse(cleaned.contains("$"))
+    assertFalse(cleaned.contains("###"))
+    assertFalse(cleaned.contains("**"))
+    assertFalse(cleaned.contains("\\Omega"))
+    assertFalse(cleaned.contains("\\text"))
+    assertTrue(cleaned.contains("Ω"))
+    assertTrue(cleaned.contains("×"))
+    assertTrue(cleaned.contains("(120 ÷ 40)"))
+    assertTrue(cleaned.contains("• المقاومة"))
   }
 }
 

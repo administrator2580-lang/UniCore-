@@ -1,8 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Cloud,
   Download,
   ExternalLink,
+  Eye,
   FileText,
   Folder,
   Image as ImageIcon,
@@ -50,12 +51,19 @@ export default function CoursesView({
   const [selectedYear, setSelectedYear] = useState(null);
   const [openingCourseId, setOpeningCourseId] = useState(null);
   const [openingDriveId, setOpeningDriveId] = useState(null);
+  const [inAppPreview, setInAppPreview] = useState(null); // { title, url, mimeType, isIframe, revokeUrl }
 
   const [showCreateCourse, setShowCreateCourse] = useState(false);
   const [editingCourse, setEditingCourse] = useState(null);
   const [showDriveModal, setShowDriveModal] = useState(false);
   const [showDeptModal, setShowDeptModal] = useState(false);
   const [editingDept, setEditingDept] = useState(null);
+
+  useEffect(() => {
+    return () => {
+      if (inAppPreview?.revokeUrl) URL.revokeObjectURL(inAppPreview.revokeUrl);
+    };
+  }, [inAppPreview]);
 
   const selectedDept = useMemo(
     () => departments.find((d) => d.id === selectedDepartmentId) || null,
@@ -122,18 +130,29 @@ export default function CoursesView({
     }
   };
 
+  const showBase64InModal = (title, base64, mimeType) => {
+    const clean = atob(base64);
+    const bytes = new Uint8Array(clean.length);
+    for (let i = 0; i < clean.length; i++) bytes[i] = clean.charCodeAt(i);
+    const blobUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType || 'application/pdf' }));
+    setInAppPreview({ title, url: blobUrl, mimeType, isIframe: mimeType === 'application/pdf', revokeUrl: blobUrl });
+  };
+
   const handleOpenCourseFile = async (course) => {
     setOpeningCourseId(course.id);
     try {
       const res = await downloadCourseAttachmentBytes(db, course);
       if (window.unicoreDesktop?.openLocalCourseFile) {
-        await window.unicoreDesktop.openLocalCourseFile({
+        const saved = await window.unicoreDesktop.openLocalCourseFile({
           courseId: course.id,
           fileName: res.fileName,
           base64: res.base64
         });
+        if (saved?.downloadsPath) {
+          onShowToast(`${strings.downloadedSavedToast} ${saved.fileName || res.fileName}`);
+        }
       } else {
-        triggerBrowserFileOpen(res.bytes, res.mimeType, res.fileName);
+        showBase64InModal(res.fileName, res.base64, res.mimeType);
       }
     } catch (err) {
       onShowToast(err.message || 'Failed to open attachment');
@@ -142,13 +161,39 @@ export default function CoursesView({
     }
   };
 
-  const handleOpenDriveFile = async (item) => {
+  const handleOpenDriveFile = async (item, previewInsideApp = false) => {
     setOpeningDriveId(item.fileId);
     try {
       if (window.unicoreDesktop?.downloadAndOpenDriveFile) {
-        await window.unicoreDesktop.downloadAndOpenDriveFile(item);
+        const res = await window.unicoreDesktop.downloadAndOpenDriveFile({
+          ...item,
+          openExternally: !previewInsideApp
+        });
+        if (res?.downloadsPath) {
+          onShowToast(`${strings.downloadedSavedToast} ${res.fileName || item.name}`);
+        }
+        if (previewInsideApp && res?.base64) {
+          showBase64InModal(res.fileName || item.name, res.base64, res.mimeType);
+        } else if (res?.openedInBrowser) {
+          onShowToast(item.name);
+        }
+      } else if (previewInsideApp && !item.isSubFolder) {
+        setInAppPreview({
+          title: item.name,
+          url: `https://drive.google.com/file/d/${item.fileId}/preview`,
+          mimeType: 'application/pdf',
+          isIframe: true,
+          revokeUrl: null
+        });
       } else {
-        await openSafeExternalUrl(item.viewUrl);
+        const a = document.createElement('a');
+        a.href = item.downloadUrl || item.viewUrl;
+        a.download = item.name || 'material';
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
       }
     } catch (err) {
       onShowToast(err.message || 'Failed to open Google Drive file');
@@ -401,37 +446,48 @@ export default function CoursesView({
                 ))}
               </div>
 
-              {window.unicoreDesktop?.syncDriveFolders ? (
-                filteredDriveFiles.length === 0 && !isDriveRefreshing ? (
-                  <div className="muted">{strings.noDriveFilesYet}</div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {filteredDriveFiles.map((item) => (
-                      <div
-                        key={item.fileId}
-                        className="m3-subsurface"
-                        style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', background: 'var(--surface)' }}
-                      >
-                        <div className="row-gap" style={{ minWidth: 0, flex: 1 }}>
-                          {item.isSubFolder ? (
-                            <Folder size={18} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-                          ) : (
-                            <FileText size={18} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-                          )}
-                          <div style={{ minWidth: 0 }}>
-                            <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {item.name}
-                            </div>
-                            <div className="muted" style={{ fontSize: '0.78rem' }}>
-                              {item.folderTitle}
-                            </div>
+              {filteredDriveFiles.length === 0 && !isDriveRefreshing ? (
+                <div className="muted">{strings.noDriveFilesYet}</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {filteredDriveFiles.map((item) => (
+                    <div
+                      key={item.fileId}
+                      className="m3-subsurface"
+                      style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px', background: 'var(--surface)' }}
+                    >
+                      <div className="row-gap" style={{ minWidth: 0, flex: '1 1 200px' }}>
+                        {item.isSubFolder ? (
+                          <Folder size={18} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+                        ) : (
+                          <FileText size={18} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+                        )}
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {item.name}
+                          </div>
+                          <div className="muted" style={{ fontSize: '0.78rem' }}>
+                            {item.folderTitle}
                           </div>
                         </div>
+                      </div>
+                      <div className="row-gap">
+                        {!item.isSubFolder ? (
+                          <button
+                            type="button"
+                            className="btn btn-tonal"
+                            disabled={openingDriveId === item.fileId}
+                            onClick={() => handleOpenDriveFile(item, true)}
+                          >
+                            <Eye size={15} />
+                            <span>{strings.previewInAppAction}</span>
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           className="btn btn-outlined"
                           disabled={openingDriveId === item.fileId}
-                          onClick={() => handleOpenDriveFile(item)}
+                          onClick={() => handleOpenDriveFile(item, false)}
                         >
                           {openingDriveId === item.fileId ? (
                             <span className="spinner" />
@@ -443,10 +499,10 @@ export default function CoursesView({
                           )}
                         </button>
                       </div>
-                    ))}
-                  </div>
-                )
-              ) : null}
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           ) : null}
         </div>
@@ -640,6 +696,50 @@ export default function CoursesView({
               : null
           }
         />
+      ) : null}
+      {inAppPreview ? (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (inAppPreview.revokeUrl) URL.revokeObjectURL(inAppPreview.revokeUrl);
+            setInAppPreview(null);
+          }}
+        >
+          <div
+            className="modal-panel"
+            style={{ maxWidth: '920px', width: '94vw', height: '84vh' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="row-between">
+              <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {inAppPreview.title}
+              </strong>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => {
+                  if (inAppPreview.revokeUrl) URL.revokeObjectURL(inAppPreview.revokeUrl);
+                  setInAppPreview(null);
+                }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            {String(inAppPreview.mimeType || '').startsWith('image/') && !inAppPreview.isIframe ? (
+              <img
+                src={inAppPreview.url}
+                alt={inAppPreview.title}
+                style={{ width: '100%', flex: 1, minHeight: 0, objectFit: 'contain', borderRadius: '10px' }}
+              />
+            ) : (
+              <iframe
+                src={inAppPreview.url}
+                title={inAppPreview.title}
+                style={{ width: '100%', flex: 1, minHeight: '420px', border: '1px solid var(--outline-variant)', borderRadius: '10px' }}
+              />
+            )}
+          </div>
+        </div>
       ) : null}
     </div>
   );

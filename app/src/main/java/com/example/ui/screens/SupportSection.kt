@@ -1,22 +1,35 @@
 package com.example.ui.screens
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.SupportAgent
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -30,8 +43,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.model.SupportChannel
 import com.example.data.model.SupportMessage
@@ -44,8 +61,8 @@ fun SupportMessagingCard(
     userRole: UserRole,
     currentUserId: String,
     messagesState: UiState<List<SupportMessage>>,
-    onSendMessage: (String, String) -> Unit,
-    onReplyMessage: (SupportMessage, String) -> Unit
+    onSendMessage: (String, String, Uri?) -> Unit,
+    onReplyMessage: (SupportMessage, String, Uri?) -> Unit
 ) {
     val strings = LocalAppStrings.current
     var showComposeDialog by remember { mutableStateOf(false) }
@@ -197,8 +214,8 @@ fun SupportMessagingCard(
         ComposeSupportDialog(
             title = dialogTitle,
             onDismiss = { showComposeDialog = false },
-            onConfirm = { subject, body ->
-                onSendMessage(subject, body)
+            onConfirm = { subject, body, imageUri ->
+                onSendMessage(subject, body, imageUri)
                 showComposeDialog = false
             }
         )
@@ -209,8 +226,8 @@ fun SupportMessagingCard(
         ReplySupportDialog(
             message = targetReply,
             onDismiss = { replyingTo = null },
-            onConfirm = { replyText ->
-                onReplyMessage(targetReply, replyText)
+            onConfirm = { replyText, imageUri ->
+                onReplyMessage(targetReply, replyText, imageUri)
                 replyingTo = null
             }
         )
@@ -225,6 +242,15 @@ private fun SupportMessageItem(
 ) {
     val strings = LocalAppStrings.current
     val isReplied = message.status == "REPLIED" && !message.replyText.isNullOrBlank()
+    var zoomedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    val questionBitmap = remember(message.id, message.attachmentBase64) {
+        decodeSupportBase64Bitmap(message.attachmentBase64)
+    }
+    val replyBitmap = remember(message.id, message.replyAttachmentBase64) {
+        decodeSupportBase64Bitmap(message.replyAttachmentBase64)
+    }
+
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
         shape = MaterialTheme.shapes.small,
@@ -269,6 +295,18 @@ private fun SupportMessageItem(
                 text = message.body,
                 style = MaterialTheme.typography.bodyMedium
             )
+            if (questionBitmap != null) {
+                Image(
+                    bitmap = questionBitmap.asImageBitmap(),
+                    contentDescription = message.attachmentName ?: "Support attachment",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 180.dp)
+                        .clip(MaterialTheme.shapes.small)
+                        .clickable { zoomedBitmap = questionBitmap }
+                )
+            }
 
             if (isReplied) {
                 Surface(
@@ -276,7 +314,10 @@ private fun SupportMessageItem(
                     shape = MaterialTheme.shapes.extraSmall,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(10.dp)) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Text(
                             text = message.repliedByName ?: strings.roleAdmin,
                             style = MaterialTheme.typography.labelSmall,
@@ -287,6 +328,18 @@ private fun SupportMessageItem(
                             text = message.replyText.orEmpty(),
                             style = MaterialTheme.typography.bodySmall
                         )
+                        if (replyBitmap != null) {
+                            Image(
+                                bitmap = replyBitmap.asImageBitmap(),
+                                contentDescription = message.replyAttachmentName ?: "Reply attachment",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 180.dp)
+                                    .clip(MaterialTheme.shapes.small)
+                                    .clickable { zoomedBitmap = replyBitmap }
+                            )
+                        }
                     }
                 }
             }
@@ -300,17 +353,52 @@ private fun SupportMessageItem(
             }
         }
     }
+
+    val zoomed = zoomedBitmap
+    if (zoomed != null) {
+        AlertDialog(
+            onDismissRequest = { zoomedBitmap = null },
+            text = {
+                Image(
+                    bitmap = zoomed.asImageBitmap(),
+                    contentDescription = "Zoomed attachment",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 460.dp)
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { zoomedBitmap = null }) { Text(strings.cancelAction) }
+            }
+        )
+    }
+}
+
+private fun decodeSupportBase64Bitmap(base64: String?): Bitmap? {
+    if (base64.isNullOrBlank()) return null
+    return runCatching {
+        val bytes = Base64.decode(base64, Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    }.getOrNull()
 }
 
 @Composable
 private fun ComposeSupportDialog(
     title: String,
     onDismiss: () -> Unit,
-    onConfirm: (String, String) -> Unit
+    onConfirm: (String, String, Uri?) -> Unit
 ) {
     val strings = LocalAppStrings.current
     var subject by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
+    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+
+    val photoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) selectedImageUri = uri
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -331,11 +419,20 @@ private fun ComposeSupportDialog(
                     minLines = 3,
                     modifier = Modifier.fillMaxWidth().testTag("support_body_input")
                 )
+                SupportImagePickerRow(
+                    selectedUri = selectedImageUri,
+                    onPickImage = {
+                        photoPicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    onClear = { selectedImageUri = null }
+                )
             }
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(subject, body) },
+                onClick = { onConfirm(subject, body, selectedImageUri) },
                 enabled = subject.isNotBlank() && body.isNotBlank(),
                 modifier = Modifier.testTag("confirm_send_support")
             ) {
@@ -352,10 +449,17 @@ private fun ComposeSupportDialog(
 private fun ReplySupportDialog(
     message: SupportMessage,
     onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit
+    onConfirm: (String, Uri?) -> Unit
 ) {
     val strings = LocalAppStrings.current
     var reply by remember { mutableStateOf(message.replyText.orEmpty()) }
+    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+
+    val photoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) selectedImageUri = uri
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -370,11 +474,20 @@ private fun ReplySupportDialog(
                     minLines = 3,
                     modifier = Modifier.fillMaxWidth().testTag("support_reply_input")
                 )
+                SupportImagePickerRow(
+                    selectedUri = selectedImageUri,
+                    onPickImage = {
+                        photoPicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    onClear = { selectedImageUri = null }
+                )
             }
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(reply) },
+                onClick = { onConfirm(reply, selectedImageUri) },
                 enabled = reply.isNotBlank(),
                 modifier = Modifier.testTag("confirm_reply_support")
             ) {
@@ -385,4 +498,52 @@ private fun ReplySupportDialog(
             TextButton(onClick = onDismiss) { Text(strings.cancelAction) }
         }
     )
+}
+
+@Composable
+private fun SupportImagePickerRow(
+    selectedUri: Uri?,
+    onPickImage: () -> Unit,
+    onClear: () -> Unit
+) {
+    val strings = LocalAppStrings.current
+    if (selectedUri == null) {
+        OutlinedButton(
+            onClick = onPickImage,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.size(6.dp))
+            Text(strings.attachImageButton)
+        }
+    } else {
+        Surface(
+            color = MaterialTheme.colorScheme.secondaryContainer,
+            shape = MaterialTheme.shapes.small,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Text(
+                        text = selectedUri.lastPathSegment ?: strings.attachImageButton,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                IconButton(onClick = onClear, modifier = Modifier.size(24.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = strings.clearLabel, modifier = Modifier.size(14.dp))
+                }
+            }
+        }
+    }
 }

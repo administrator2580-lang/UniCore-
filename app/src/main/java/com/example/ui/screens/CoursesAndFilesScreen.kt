@@ -1,21 +1,29 @@
 package com.example.ui.screens
 
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -23,6 +31,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
@@ -55,17 +65,25 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.data.model.AcademicDepartment
 import com.example.data.model.Course
 import com.example.data.model.DriveFolderLink
@@ -75,7 +93,10 @@ import com.example.data.model.UserRole
 import com.example.data.model.VerifiedFileRecord
 import com.example.security.InputValidator
 import com.example.ui.i18n.LocalAppStrings
+import com.example.ui.viewmodel.InAppFilePreview
 import com.example.ui.viewmodel.UiState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun CoursesScreen(
@@ -1334,7 +1355,8 @@ private fun DepartmentEditorDialog(
 @Composable
 fun SecureFilesVaultScreen(
     filesState: UiState<List<VerifiedFileRecord>>,
-    onFilePicked: (Uri) -> Unit
+    onFilePicked: (Uri) -> Unit,
+    onDeleteFile: (VerifiedFileRecord) -> Unit
 ) {
     val strings = LocalAppStrings.current
     val pdfPickerLauncher = rememberLauncherForActivityResult(
@@ -1418,35 +1440,236 @@ fun SecureFilesVaultScreen(
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                             ) {
-                                Column(
-                                    modifier = Modifier.padding(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(14.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
                                     ) {
-                                        Icon(
-                                            Icons.Default.Verified,
-                                            contentDescription = file.originalName,
-                                            tint = MaterialTheme.colorScheme.secondary,
-                                            modifier = Modifier.size(18.dp)
-                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Verified,
+                                                contentDescription = file.originalName,
+                                                tint = MaterialTheme.colorScheme.secondary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Text(
+                                                text = file.originalName,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
                                         Text(
-                                            text = file.originalName,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            text = "${file.mimeType} • ${(file.sizeBytes / 1024).coerceAtLeast(1)} KB",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
-                                    Text(
-                                        text = "${file.mimeType} • ${(file.sizeBytes / 1024).coerceAtLeast(1)} KB",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                    IconButton(
+                                        onClick = { onDeleteFile(file) },
+                                        modifier = Modifier.testTag("delete_file_${file.id}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = strings.deleteLabel,
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                    }
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun InAppFilePreviewDialog(
+    preview: InAppFilePreview,
+    onDismiss: () -> Unit,
+    onOpenExternal: () -> Unit
+) {
+    val strings = LocalAppStrings.current
+    var imageBitmap by remember(preview.file.absolutePath) { mutableStateOf<Bitmap?>(null) }
+    var pdfPageBitmap by remember(preview.file.absolutePath) { mutableStateOf<Bitmap?>(null) }
+    var pageIndex by remember(preview.file.absolutePath) { mutableIntStateOf(0) }
+    var pageCount by remember(preview.file.absolutePath) { mutableIntStateOf(0) }
+    var previewError by remember(preview.file.absolutePath) { mutableStateOf<String?>(null) }
+
+    val isPdf = preview.mimeType == "application/pdf"
+
+    LaunchedEffect(preview.file.absolutePath, pageIndex) {
+        previewError = null
+        if (isPdf) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    ParcelFileDescriptor.open(preview.file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+                        PdfRenderer(pfd).use { renderer ->
+                            val count = renderer.pageCount
+                            pageCount = count
+                            if (count > 0) {
+                                val safeIndex = pageIndex.coerceIn(0, count - 1)
+                                renderer.openPage(safeIndex).use { page ->
+                                    val scale = 2
+                                    val bmp = Bitmap.createBitmap(
+                                        (page.width * scale).coerceIn(300, 1800),
+                                        (page.height * scale).coerceIn(400, 2400),
+                                        Bitmap.Config.ARGB_8888
+                                    )
+                                    bmp.eraseColor(android.graphics.Color.WHITE)
+                                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                    pdfPageBitmap = bmp
+                                }
+                            }
+                        }
+                    }
+                }.onFailure { err ->
+                    previewError = err.message ?: "Could not render PDF preview."
+                }
+            }
+        } else {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val bmp = BitmapFactory.decodeFile(preview.file.absolutePath)
+                    if (bmp == null) {
+                        previewError = "Could not decode image."
+                    } else {
+                        imageBitmap = bmp
+                    }
+                }.onFailure { err ->
+                    previewError = err.message ?: "Could not load image."
+                }
+            }
+        }
+    }
+
+    DisposableEffect(preview.file.absolutePath) {
+        onDispose {
+            imageBitmap = null
+            pdfPageBitmap = null
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.95f)
+                .heightIn(min = 320.dp, max = 720.dp),
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = strings.inAppPreviewTitle,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = preview.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = strings.cancelAction)
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .heightIn(min = 240.dp, max = 520.dp)
+                        .background(Color.Black.copy(alpha = 0.06f), MaterialTheme.shapes.medium)
+                        .verticalScroll(rememberScrollState()),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val activeBmp = if (isPdf) pdfPageBitmap else imageBitmap
+                    when {
+                        previewError != null -> Text(
+                            text = previewError.orEmpty(),
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                        activeBmp != null -> Image(
+                            bitmap = activeBmp.asImageBitmap(),
+                            contentDescription = preview.title,
+                            contentScale = ContentScale.FillWidth,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(4.dp)
+                        )
+                        else -> CircularProgressIndicator(modifier = Modifier.padding(24.dp))
+                    }
+                }
+
+                if (isPdf && pageCount > 1) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = { if (pageIndex > 0) pageIndex-- },
+                            enabled = pageIndex > 0
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = strings.prevQuestion)
+                        }
+                        Text(
+                            text = "${pageIndex + 1} / $pageCount",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 12.dp)
+                        )
+                        IconButton(
+                            onClick = { if (pageIndex < pageCount - 1) pageIndex++ },
+                            enabled = pageIndex < pageCount - 1
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = strings.nextQuestion)
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(onClick = onOpenExternal) {
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text(strings.openExternallyAction, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Button(onClick = onDismiss) {
+                        Text(strings.cancelAction)
                     }
                 }
             }

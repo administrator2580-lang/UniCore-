@@ -4,8 +4,10 @@ import {
   Ban,
   Bell,
   ClipboardCheck,
+  Clock,
   FolderKanban,
   LogOut,
+  MessageSquare,
   Moon,
   School,
   Sparkles,
@@ -37,6 +39,7 @@ import QuizzesView from './components/QuizzesView';
 import AiTutorView from './components/AiTutorView';
 import FilesVaultView from './components/FilesVaultView';
 import AccountConsoleView from './components/AccountConsoleView';
+import ChatView from './components/ChatView';
 import NotificationsDrawer from './components/NotificationsDrawer';
 
 const PREFS_KEY = 'unicore_prefs_v1';
@@ -148,6 +151,7 @@ export default function App() {
         <AuthenticatedShell
           key={currentUser.uid}
           clients={clients}
+          onClientsUpdated={setClients}
           currentUser={currentUser}
           strings={strings}
           prefs={prefs}
@@ -166,9 +170,19 @@ export default function App() {
   );
 }
 
-function AuthenticatedShell({ clients, currentUser, strings, prefs, setPrefs, onCycleTheme, onShowToast }) {
+function AuthenticatedShell({
+  clients,
+  onClientsUpdated,
+  currentUser,
+  strings,
+  prefs,
+  setPrefs,
+  onCycleTheme,
+  onShowToast
+}) {
   const { auth, db } = clients;
   const uid = currentUser.uid;
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const [tab, setTab] = useState('COURSES');
   const [showNotifications, setShowNotifications] = useState(false);
@@ -229,10 +243,19 @@ function AuthenticatedShell({ clients, currentUser, strings, prefs, setPrefs, on
   }, [db, uid]);
 
   const isDisabledNonSuper = Boolean(userProfile?.accountDisabled) && userRole !== 'SUPER_ADMIN';
+  const banUntilMillis = Number(userProfile?.banUntilMillis || 0);
+  const isTimedBannedNonSuper = banUntilMillis > nowMs && userRole !== 'SUPER_ADMIN';
+  const isBlockedNonSuper = isDisabledNonSuper || isTimedBannedNonSuper;
   const isAdmin = userRole !== 'STUDENT';
 
   useEffect(() => {
-    if (isDisabledNonSuper) return undefined;
+    if (banUntilMillis <= Date.now()) return undefined;
+    const id = setInterval(() => setNowMs(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, [banUntilMillis]);
+
+  useEffect(() => {
+    if (isBlockedNonSuper) return undefined;
     const unsubs = [
       subscribeCourses(db, isAdmin, setCourses, (e) => onShowToast(e.message)),
       subscribeDepartments(db, setDepartments, (e) => onShowToast(e.message)),
@@ -256,7 +279,7 @@ function AuthenticatedShell({ clients, currentUser, strings, prefs, setPrefs, on
       setAuditLogs([]);
     }
     return () => unsubs.forEach((u) => u && u());
-  }, [db, uid, userRole, isAdmin, isDisabledNonSuper]);
+  }, [db, uid, userRole, isAdmin, isBlockedNonSuper]);
 
   const refreshDriveNow = async (foldersToSync = driveFolders) => {
     if (!window.unicoreDesktop?.syncDriveFolders) return;
@@ -303,15 +326,34 @@ function AuthenticatedShell({ clients, currentUser, strings, prefs, setPrefs, on
     }
   }, [notifications, prefs.desktopNotificationsEnabled, prefs.readNotificationIds, uid]);
 
-  if (isDisabledNonSuper) {
+  if (isBlockedNonSuper) {
     return (
       <div className="auth-page">
         <div className="m3-card accent-error" style={{ maxWidth: '460px', alignItems: 'center', textAlign: 'center', padding: '28px' }}>
-          <Ban size={48} style={{ color: 'var(--error)' }} />
-          <h2 style={{ margin: 0, color: 'var(--on-error-container)' }}>{strings.accountSuspendedTitle}</h2>
-          <p style={{ margin: 0, color: 'var(--on-error-container)', lineHeight: 1.55 }}>
-            {strings.accountSuspendedBody}
-          </p>
+          {isTimedBannedNonSuper ? (
+            <Clock size={48} style={{ color: 'var(--error)' }} />
+          ) : (
+            <Ban size={48} style={{ color: 'var(--error)' }} />
+          )}
+          <h2 style={{ margin: 0, color: 'var(--on-error-container)' }}>
+            {isTimedBannedNonSuper ? strings.bannedGateTitle : strings.accountSuspendedTitle}
+          </h2>
+          {isTimedBannedNonSuper ? (
+            <>
+              {userProfile?.banReason ? (
+                <p style={{ margin: 0, color: 'var(--on-error-container)', fontWeight: 700 }}>
+                  {userProfile.banReason}
+                </p>
+              ) : null}
+              <p style={{ margin: 0, color: 'var(--on-error-container)', lineHeight: 1.55 }}>
+                {strings.bannedUntilLabel}: {new Date(banUntilMillis).toLocaleString()}
+              </p>
+            </>
+          ) : (
+            <p style={{ margin: 0, color: 'var(--on-error-container)', lineHeight: 1.55 }}>
+              {strings.accountSuspendedBody}
+            </p>
+          )}
           <button type="button" className="btn btn-primary" style={{ width: '100%' }} onClick={() => signOutUnified(auth)}>
             <LogOut size={17} />
             <span>{strings.signOutAction}</span>
@@ -332,6 +374,7 @@ function AuthenticatedShell({ clients, currentUser, strings, prefs, setPrefs, on
   const navItems = [
     { id: 'COURSES', label: strings.navCourses, icon: School },
     { id: 'QUIZZES', label: strings.navQuizzes, icon: ClipboardCheck },
+    { id: 'CHAT', label: strings.navChat, icon: MessageSquare },
     { id: 'AI_TUTOR', label: strings.navTutor, icon: Sparkles },
     { id: 'VAULT', label: strings.navFiles, icon: FolderKanban },
     { id: 'ACCOUNT', label: strings.navAccount, icon: UserCheck }
@@ -433,6 +476,18 @@ function AuthenticatedShell({ clients, currentUser, strings, prefs, setPrefs, on
               />
             ) : null}
 
+            {tab === 'CHAT' ? (
+              <ChatView
+                strings={strings}
+                db={db}
+                auth={auth}
+                currentUserId={uid}
+                userRole={userRole}
+                departments={departments}
+                onShowToast={onShowToast}
+              />
+            ) : null}
+
             {tab === 'AI_TUTOR' ? (
               <AiTutorView
                 strings={strings}
@@ -475,6 +530,7 @@ function AuthenticatedShell({ clients, currentUser, strings, prefs, setPrefs, on
                 roleInvites={roleInvites}
                 supportMessages={supportMessages}
                 auditLogs={auditLogs}
+                onClientsUpdated={onClientsUpdated}
                 onSignOut={() => signOutUnified(auth)}
                 onShowToast={onShowToast}
               />

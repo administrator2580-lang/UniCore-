@@ -68,7 +68,9 @@ export default defineConfig(({ mode }) => {
     appId: env.VITE_FIREBASE_APP_ID || fallback.appId,
     firestoreDatabaseId: env.VITE_FIREBASE_DATABASE_ID || fallback.firestoreDatabaseId,
     webClientId: env.VITE_GOOGLE_WEB_CLIENT_ID || fallback.webClientId,
-    recaptchaSiteKey: env.VITE_RECAPTCHA_SITE_KEY || fallback.recaptchaSiteKey
+    recaptchaSiteKey: env.VITE_RECAPTCHA_SITE_KEY || fallback.recaptchaSiteKey,
+    webRecaptchaKey: env.VITE_FIREBASE_RECAPTCHA_V3_KEY || '',
+    appCheckDebugToken: env.VITE_FIREBASE_APPCHECK_DEBUG_TOKEN || ''
   };
 
   return {

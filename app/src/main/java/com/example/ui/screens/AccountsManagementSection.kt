@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ManageAccounts
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -33,6 +34,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -47,6 +49,9 @@ import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.viewmodel.UiState
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -59,11 +64,13 @@ fun AccountsManagementCard(
     onRevokeInvite: (String) -> Unit,
     onPromoteUser: (UserProfile) -> Unit,
     onDemoteAdmin: (String) -> Unit,
-    onToggleAccountDisabled: (UserProfile, Boolean) -> Unit
+    onToggleAccountDisabled: (UserProfile, Boolean) -> Unit,
+    onTimedBanUser: (UserProfile, Long, String) -> Unit
 ) {
     val strings = LocalAppStrings.current
     var showInviteDialog by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
+    var banTargetUser by remember { mutableStateOf<UserProfile?>(null) }
 
     val users = (usersState as? UiState.Success)?.data.orEmpty()
     val filteredUsers = remember(users, searchQuery) {
@@ -71,6 +78,7 @@ fun AccountsManagementCard(
         else users.filter { it.displayName.contains(searchQuery.trim(), ignoreCase = true) }
     }
     val invites = (invitesState as? UiState.Success)?.data.orEmpty()
+    val nowMillis = remember(users) { System.currentTimeMillis() }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -180,8 +188,12 @@ fun AccountsManagementCard(
 
             filteredUsers.forEach { user ->
                 val roleEnum = UserRole.fromRaw(user.role)
+                val isTimedBanned = user.banUntilMillis > nowMillis
+                val canTimedBan = (currentRole == UserRole.SUPER_ADMIN && user.userId != currentUserId && roleEnum != UserRole.SUPER_ADMIN) ||
+                    (currentRole == UserRole.ADMIN && roleEnum == UserRole.STUDENT && user.userId != currentUserId)
+
                 Surface(
-                    color = if (user.accountDisabled) {
+                    color = if (user.accountDisabled || isTimedBanned) {
                         MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f)
                     } else {
                         MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
@@ -215,9 +227,21 @@ fun AccountsManagementCard(
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.primary
                                 )
+                                if (isTimedBanned) {
+                                    val formatted = remember(user.banUntilMillis) {
+                                        SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+                                            .format(Date(user.banUntilMillis))
+                                    }
+                                    Text(
+                                        text = "${strings.bannedUntilBody} $formatted" +
+                                            if (user.banReason.isNotBlank()) " (${user.banReason})" else "",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
                             }
                             Surface(
-                                color = if (user.accountDisabled) {
+                                color = if (user.accountDisabled || isTimedBanned) {
                                     MaterialTheme.colorScheme.errorContainer
                                 } else {
                                     MaterialTheme.colorScheme.secondaryContainer
@@ -225,10 +249,14 @@ fun AccountsManagementCard(
                                 shape = MaterialTheme.shapes.extraSmall
                             ) {
                                 Text(
-                                    text = if (user.accountDisabled) strings.accountStatusDisabled else strings.accountStatusActive,
+                                    text = when {
+                                        user.accountDisabled -> strings.accountStatusDisabled
+                                        isTimedBanned -> strings.banUserAction
+                                        else -> strings.accountStatusActive
+                                    },
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = if (user.accountDisabled) {
+                                    color = if (user.accountDisabled || isTimedBanned) {
                                         MaterialTheme.colorScheme.onErrorContainer
                                     } else {
                                         MaterialTheme.colorScheme.onSecondaryContainer
@@ -238,40 +266,70 @@ fun AccountsManagementCard(
                             }
                         }
 
-                        if (currentRole == UserRole.SUPER_ADMIN && user.userId != currentUserId && roleEnum != UserRole.SUPER_ADMIN) {
+                        if ((currentRole == UserRole.SUPER_ADMIN && user.userId != currentUserId && roleEnum != UserRole.SUPER_ADMIN) || canTimedBan) {
                             FlowRow(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                if (roleEnum == UserRole.STUDENT) {
-                                    OutlinedButton(onClick = { onPromoteUser(user) }) {
-                                        Text(strings.promoteToAdmin)
+                                if (currentRole == UserRole.SUPER_ADMIN && user.userId != currentUserId && roleEnum != UserRole.SUPER_ADMIN) {
+                                    if (roleEnum == UserRole.STUDENT) {
+                                        OutlinedButton(onClick = { onPromoteUser(user) }) {
+                                            Text(strings.promoteToAdmin)
+                                        }
+                                    } else if (roleEnum == UserRole.ADMIN) {
+                                        OutlinedButton(onClick = { onDemoteAdmin(user.userId) }) {
+                                            Text(strings.demoteToStudent)
+                                        }
                                     }
-                                } else if (roleEnum == UserRole.ADMIN) {
-                                    OutlinedButton(onClick = { onDemoteAdmin(user.userId) }) {
-                                        Text(strings.demoteToStudent)
+
+                                    val nextDisabled = !user.accountDisabled
+                                    OutlinedButton(
+                                        onClick = { onToggleAccountDisabled(user, nextDisabled) },
+                                        colors = ButtonDefaults.outlinedButtonColors(
+                                            contentColor = if (nextDisabled) {
+                                                MaterialTheme.colorScheme.error
+                                            } else {
+                                                MaterialTheme.colorScheme.secondary
+                                            }
+                                        ),
+                                        modifier = Modifier.testTag("toggle_account_disabled_${user.userId}")
+                                    ) {
+                                        Icon(
+                                            imageVector = if (nextDisabled) Icons.Default.Block else Icons.Default.CheckCircle,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(Modifier.size(4.dp))
+                                        Text(if (nextDisabled) strings.disableAccountAction else strings.enableAccountAction)
                                     }
                                 }
 
-                                val nextDisabled = !user.accountDisabled
-                                OutlinedButton(
-                                    onClick = { onToggleAccountDisabled(user, nextDisabled) },
-                                    colors = ButtonDefaults.outlinedButtonColors(
-                                        contentColor = if (nextDisabled) {
-                                            MaterialTheme.colorScheme.error
-                                        } else {
-                                            MaterialTheme.colorScheme.secondary
+                                if (canTimedBan) {
+                                    if (isTimedBanned) {
+                                        OutlinedButton(
+                                            onClick = { onTimedBanUser(user, 0L, "") },
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                contentColor = MaterialTheme.colorScheme.secondary
+                                            ),
+                                            modifier = Modifier.testTag("unban_user_${user.userId}")
+                                        ) {
+                                            Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.size(4.dp))
+                                            Text(strings.unbanUserAction)
                                         }
-                                    ),
-                                    modifier = Modifier.testTag("toggle_account_disabled_${user.userId}")
-                                ) {
-                                    Icon(
-                                        imageVector = if (nextDisabled) Icons.Default.Block else Icons.Default.CheckCircle,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(Modifier.size(4.dp))
-                                    Text(if (nextDisabled) strings.disableAccountAction else strings.enableAccountAction)
+                                    } else {
+                                        OutlinedButton(
+                                            onClick = { banTargetUser = user },
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                contentColor = MaterialTheme.colorScheme.error
+                                            ),
+                                            modifier = Modifier.testTag("timed_ban_${user.userId}")
+                                        ) {
+                                            Icon(Icons.Default.Timer, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.size(4.dp))
+                                            Text(strings.banUserAction)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -291,6 +349,95 @@ fun AccountsManagementCard(
             }
         )
     }
+
+    val targetBan = banTargetUser
+    if (targetBan != null) {
+        TimedBanDialog(
+            targetUser = targetBan,
+            onDismiss = { banTargetUser = null },
+            onConfirm = { minutes, reason ->
+                onTimedBanUser(targetBan, minutes, reason)
+                banTargetUser = null
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TimedBanDialog(
+    targetUser: UserProfile,
+    onDismiss: () -> Unit,
+    onConfirm: (Long, String) -> Unit
+) {
+    val strings = LocalAppStrings.current
+    var durationMinutes by remember { mutableLongStateOf(60L) }
+    var customMinutesText by remember { mutableStateOf("60") }
+    var reason by remember { mutableStateOf("") }
+
+    val presets = listOf(
+        60L to "1h",
+        360L to "6h",
+        1440L to "24h",
+        4320L to "3d",
+        10080L to "7d",
+        43200L to "30d"
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("${strings.timedBanTitle}: ${targetUser.displayName}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    presets.forEach { (mins, label) ->
+                        FilterChip(
+                            selected = durationMinutes == mins,
+                            onClick = {
+                                durationMinutes = mins
+                                customMinutesText = mins.toString()
+                            },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    value = customMinutesText,
+                    onValueChange = { raw ->
+                        val digits = raw.filter(Char::isDigit).take(6)
+                        customMinutesText = digits
+                        durationMinutes = digits.toLongOrNull() ?: 0L
+                    },
+                    label = { Text(strings.durationLabel) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("ban_duration_input")
+                )
+                OutlinedTextField(
+                    value = reason,
+                    onValueChange = { reason = it },
+                    label = { Text(strings.banReasonLabel) },
+                    singleLine = false,
+                    maxLines = 2,
+                    modifier = Modifier.fillMaxWidth().testTag("ban_reason_input")
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(durationMinutes.coerceAtLeast(1L), reason) },
+                enabled = durationMinutes > 0L,
+                modifier = Modifier.testTag("confirm_timed_ban")
+            ) {
+                Text(strings.banUserAction)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(strings.cancelAction) }
+        }
+    )
 }
 
 @Composable

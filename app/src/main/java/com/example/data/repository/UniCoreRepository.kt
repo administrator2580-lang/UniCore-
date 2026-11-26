@@ -15,7 +15,9 @@ import com.example.data.model.RoleInvite
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
 import com.example.data.model.VerifiedFileRecord
+import com.example.security.ImageAttachmentHelper
 import com.example.security.InputValidator
+import com.example.security.ProfanityFilter
 import com.example.security.SecureFileValidator
 import com.example.security.ZeroCostQuotaManager
 import com.google.firebase.Firebase
@@ -612,12 +614,17 @@ class UniCoreRepository(
         courseId: String,
         title: String,
         durationMinutes: Int,
+        startAtMillis: Long = 0L,
+        endAtMillis: Long = 0L,
+        quizImage: ImageAttachmentHelper.CompressedImage? = null,
         questionPrompts: List<String>,
         optionBlocks: List<String>,
         correctOptionIndices: List<Int>,
         governance: UniCoreGovernanceRepository
     ): Result<Unit> {
         var docPath = "quizzes"
+        val quizRef = db.collection("quizzes").document()
+        var createdDoc = false
         return try {
             val uid = requireUserId()
             if (courseId.isBlank()) return Result.failure(IllegalArgumentException("Select a course first."))
@@ -626,7 +633,7 @@ class UniCoreRepository(
                 is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
             }
             val cleanPrompts = questionPrompts.mapNotNull { raw ->
-                when (val r = InputValidator.validateBoundedText(raw, "Question", 5, 250)) {
+                when (val r = InputValidator.validateBoundedText(raw, "Question", 3, 250)) {
                     is InputValidator.ValidationResult.Valid -> r.value
                     is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
                 }
@@ -636,9 +643,34 @@ class UniCoreRepository(
             }
 
             val cleanOptionBlocks = optionBlocks.map { block ->
+                ProfanityFilter.assertCleanText(block)
                 val opts = block.split("|").map { InputValidator.sanitizeText(it).take(80) }.filter { it.isNotBlank() }
                 if (opts.size < 2) return Result.failure(IllegalArgumentException("Each question needs at least 2 options."))
+                if (opts.size > 6) return Result.failure(IllegalArgumentException("Maximum 6 options per question."))
                 opts.joinToString("|")
+            }
+
+            val safeStartMs = startAtMillis.coerceAtLeast(0L)
+            val safeEndMs = endAtMillis.coerceAtLeast(0L)
+            if (safeStartMs > 0L && safeEndMs > 0L && safeEndMs <= safeStartMs) {
+                return Result.failure(IllegalArgumentException("Quiz closing time must be after opening time."))
+            }
+
+            val imageChunks = if (quizImage != null) {
+                val chunkLen = 450_000
+                val list = mutableListOf<String>()
+                var pos = 0
+                while (pos < quizImage.base64.length) {
+                    val end = (pos + chunkLen).coerceAtMost(quizImage.base64.length)
+                    list.add(quizImage.base64.substring(pos, end))
+                    pos = end
+                }
+                if (list.size > 4) {
+                    return Result.failure(IllegalArgumentException("Quiz image exceeds maximum allowed size."))
+                }
+                list
+            } else {
+                emptyList()
             }
 
             val safeCorrect = correctOptionIndices.mapIndexed { i, idx ->
@@ -646,21 +678,48 @@ class UniCoreRepository(
                 idx.coerceIn(0, (count - 1).coerceAtLeast(0)).toLong()
             }
 
-            val quizRef = db.collection("quizzes").document()
             docPath = quizRef.path
-            quizRef.set(
-                mapOf(
-                    "courseId" to courseId,
-                    "title" to cleanTitle,
-                    "durationMinutes" to durationMinutes.coerceIn(1, 180).toLong(),
-                    "questionPrompts" to cleanPrompts,
-                    "optionBlocks" to cleanOptionBlocks,
-                    "published" to true,
-                    "createdBy" to uid,
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val mins = durationMinutes.coerceIn(1, 180).toLong()
+            val payload = mutableMapOf<String, Any>(
+                "courseId" to courseId,
+                "title" to cleanTitle,
+                "durationMinutes" to mins,
+                "questionPrompts" to cleanPrompts,
+                "optionBlocks" to cleanOptionBlocks,
+                "hasImage" to (quizImage != null),
+                "published" to (quizImage == null),
+                "createdBy" to uid,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (safeStartMs > 0L) payload["startAtMillis"] = safeStartMs
+            if (safeEndMs > 0L) payload["endAtMillis"] = safeEndMs
+            if (quizImage != null) {
+                payload["imageName"] = quizImage.fileName
+                payload["imageMimeType"] = quizImage.mimeType
+                payload["chunkCount"] = imageChunks.size.toLong()
+            }
+
+            quizRef.set(payload).await()
+            createdDoc = true
+
+            if (quizImage != null) {
+                imageChunks.forEachIndexed { idx, chunkData ->
+                    quizRef.collection("assets").document(idx.toString()).set(
+                        mapOf(
+                            "chunkIndex" to idx.toLong(),
+                            "data" to chunkData,
+                            "createdAt" to FieldValue.serverTimestamp()
+                        )
+                    ).await()
+                }
+                quizRef.update(
+                    mapOf(
+                        "published" to true,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
 
             val keyRef = quizRef.collection("private").document("answer_key")
             docPath = keyRef.path
@@ -678,7 +737,7 @@ class UniCoreRepository(
             incrementDailyCounter(uid, isAi = false)
             governance.sendNotification(
                 title = cleanTitle,
-                body = "New ${cleanPrompts.size}-question quiz published (${durationMinutes.coerceIn(1, 180)} min).",
+                body = "New ${cleanPrompts.size}-question quiz published ($mins min).",
                 category = NotificationCategory.QUIZ,
                 targetUid = "ALL"
             )
@@ -686,7 +745,37 @@ class UniCoreRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (createdDoc) {
+                runCatching { deleteQuiz(quizRef.id) }
+            }
             handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun loadQuizImageBytes(quiz: Quiz): Result<ByteArray?> {
+        if (!quiz.hasImage || quiz.chunkCount <= 0L) return Result.success(null)
+        val docPath = "quizzes/${quiz.id}/assets"
+        return try {
+            requireUserId()
+            val snap = db.collection("quizzes").document(quiz.id).collection("assets").get().await()
+            val ordered = snap.documents
+                .mapNotNull { doc ->
+                    val idx = doc.getLong("chunkIndex") ?: doc.id.toLongOrNull() ?: return@mapNotNull null
+                    val data = doc.getString("data") ?: return@mapNotNull null
+                    idx to data
+                }
+                .sortedBy { it.first }
+            if (ordered.isEmpty()) return Result.success(null)
+            val fullBase64 = ordered.joinToString("") { it.second }
+            val bytes = withContext(Dispatchers.IO) {
+                Base64.decode(fullBase64, Base64.DEFAULT)
+            }
+            Result.success(bytes)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, docPath)
             Result.failure(e)
         }
     }
@@ -697,6 +786,10 @@ class UniCoreRepository(
             requireUserId()
             runCatching {
                 db.collection("quizzes").document(quizId).collection("private").document("answer_key").delete().await()
+            }
+            runCatching {
+                val assets = db.collection("quizzes").document(quizId).collection("assets").get().await()
+                assets.documents.forEach { it.reference.delete().await() }
             }
             db.collection("quizzes").document(quizId).delete().await()
             Result.success(Unit)
@@ -751,6 +844,86 @@ class UniCoreRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun cancelQuizForViolation(
+        quizId: String,
+        quizTitle: String,
+        selectedIndices: List<Int>,
+        reason: String,
+        governance: UniCoreGovernanceRepository
+    ): Result<Unit> {
+        var docPath = "quiz_attempts"
+        return try {
+            val uid = requireUserId()
+            val attemptId = "${uid}_${quizId}"
+            docPath = "quiz_attempts/$attemptId"
+            val studentName = InputValidator.sanitizeText(auth.currentUser?.displayName ?: "Student")
+                .take(60)
+                .ifBlank { "Student" }
+                .let { if (it.length < 2) "Student" else it }
+            val cleanReason = InputValidator.sanitizeText(reason)
+                .take(200)
+                .ifBlank { "Left the application during an active quiz." }
+                .let { if (it.length < 3) "Left app during quiz" else it }
+            val safeIndices = if (selectedIndices.isNotEmpty()) {
+                selectedIndices.map { it.toLong() }
+            } else {
+                listOf(0L)
+            }
+
+            db.collection("quiz_attempts").document(attemptId).set(
+                mapOf(
+                    "userId" to uid,
+                    "studentName" to studentName,
+                    "quizId" to quizId,
+                    "quizTitle" to quizTitle.take(100),
+                    "selectedIndices" to safeIndices,
+                    "status" to "CANCELLED_VIOLATION",
+                    "score" to 0L,
+                    "graded" to true,
+                    "cancellationReason" to cleanReason,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            governance.logAuditEvent(
+                action = "QUIZ_VIOLATION_CANCELLED",
+                severity = AuditSeverity.HIGH,
+                targetPath = docPath,
+                details = "Quiz '$quizTitle' cancelled for violation: $cleanReason"
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun resetCancelledAttemptAsSuperAdmin(
+        attempt: QuizAttempt,
+        governance: UniCoreGovernanceRepository
+    ): Result<Unit> {
+        val docPath = "quiz_attempts/${attempt.id}"
+        return try {
+            requireUserId()
+            db.collection("quiz_attempts").document(attempt.id).delete().await()
+            governance.logAuditEvent(
+                action = "QUIZ_VIOLATION_CANCELLED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Super Admin unlocked cancelled attempt for ${attempt.studentName}."
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
             Result.failure(e)
         }
     }
@@ -842,6 +1015,27 @@ class UniCoreRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteVerifiedFile(context: Context, record: VerifiedFileRecord): Result<Unit> {
+        val uid = requireUserId()
+        val docPath = "users/$uid/files/${record.id}"
+        return try {
+            db.collection("users").document(uid).collection("files").document(record.id).delete().await()
+            withContext(Dispatchers.IO) {
+                val sandboxDir = File(context.filesDir, "secure_uploads")
+                val localFile = File(sandboxDir, record.storedName)
+                if (localFile.exists()) {
+                    localFile.delete()
+                }
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
             Result.failure(e)
         }
     }

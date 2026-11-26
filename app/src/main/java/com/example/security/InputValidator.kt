@@ -57,6 +57,9 @@ object InputValidator {
         if (containsInjectionPayload(raw)) {
             return ValidationResult.Invalid("$fieldLabel contains disallowed script or injection syntax.")
         }
+        if (ProfanityFilter.containsProfanity(raw)) {
+            return ValidationResult.Invalid("تم حظر الإرسال لاحتواء النص على ألفاظ غير لائقة. يرجى الالتزام بآداب الحوار الجامعي.")
+        }
         val cleaned = sanitizeText(raw)
         return when {
             cleaned.length < minLen ->

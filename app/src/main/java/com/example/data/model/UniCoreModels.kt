@@ -55,6 +55,8 @@ data class UserProfile(
     val writesToday: Long = 0L,
     val quotaDayKey: String = "",
     val accountDisabled: Boolean = false,
+    val banUntilMillis: Long = 0L,
+    val banReason: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -153,6 +155,12 @@ data class Quiz(
     val courseId: String = "",
     val title: String = "",
     val durationMinutes: Long = 15L,
+    val startAtMillis: Long = 0L,
+    val endAtMillis: Long = 0L,
+    val hasImage: Boolean = false,
+    val imageName: String = "",
+    val imageMimeType: String = "",
+    val chunkCount: Long = 0L,
     val questionPrompts: List<String> = emptyList(),
     val optionBlocks: List<String> = emptyList(),
     val published: Boolean = true,
@@ -186,6 +194,7 @@ data class QuizAttempt(
     val score: Long = 0L,
     val graded: Boolean = false,
     val gradedBy: String? = null,
+    val cancellationReason: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -293,12 +302,35 @@ data class SupportMessage(
     val senderRole: String = UserRole.STUDENT.name,
     val subject: String = "",
     val body: String = "",
+    val attachmentBase64: String? = null,
+    val attachmentMimeType: String? = null,
+    val attachmentName: String? = null,
     val status: String = "OPEN",
     val replyText: String? = null,
+    val replyAttachmentBase64: String? = null,
+    val replyAttachmentMimeType: String? = null,
+    val replyAttachmentName: String? = null,
     val repliedByUid: String? = null,
     val repliedByName: String? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class StudyChatMessage(
+    @DocumentId val id: String = "",
+    val roomId: String = "general",
+    val departmentName: String? = null,
+    val academicYear: String? = null,
+    val senderUid: String = "",
+    val senderName: String = "",
+    val senderRole: String = UserRole.STUDENT.name,
+    val text: String = "",
+    val attachmentBase64: String? = null,
+    val attachmentMimeType: String? = null,
+    val attachmentName: String? = null,
+    @ServerTimestamp val createdAt: Timestamp? = null
 )
 
 

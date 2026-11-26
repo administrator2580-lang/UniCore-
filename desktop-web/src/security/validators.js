@@ -135,3 +135,165 @@ export async function validateSelectedUploadFile(file, maxBytes = MAX_VAULT_FILE
     bytes
   };
 }
+
+// --- Profanity & Abuse Guard (Arabic + Franco-Arab + English) ---
+
+const PROFANITY_REGEX_LIST = [
+  // English explicit slurs & profanity (word boundaries prevent benign substrings)
+  /\b(f+u+c+k+(?:ing|er|ed|s)?|s+h+i+t+(?:ty|s)?|b+i+t+c+h+(?:es|ing)?|a+s+s+h+o+l+e+s?|b+a+s+t+a+r+d+s?|d+i+c+k+(?:head|s)?|p+u+s+s+y|c+u+n+t+s?|w+h+o+r+e+s?|s+l+u+t+s?|m+o+t+h+e+r+f+u+c+k+e*r*|n+i+g+g+(?:a|er)s?|f+a+g+g*o*t*s?)\b/i,
+  // Franco-Arab common insults
+  /\b(k+o+s+o+m+(?:a+k|o+k|h+o+m)?|a+h+b+a+|s+h+a+r+m+o+t+a*|m+e+t+n+a+k+|a+r+s+|m+a+3+r+a+s+|k+h+a+w+a+l+|z+e+b+y*|t+e+z+a+k+|y+a+b+n\s*e+l\s*(?:w+e+s+k+h+a+|a+h+b+a+|m+e+t+n+a+k+a+))\b/i,
+  // Normalized Arabic roots/phrases
+  /(?:^|\s|[،.؟!:\-_])(كس\s*امك|كسمك|كس\s*اختك|شرموط|شرموطه|قحب|قحبه|منيك|متناك|متناكه|ابن\s*الوسخه|ابن\s*الكلب|ابن\s*الحرام|يلعن|يلعن\s*دين|خول|معرص|عرص|زبي|زبك|طيز|طيزك|حيوان|حمار|وسخ|زباله|نجس|كسم|لعنه\s*الله)(?=$|\s|[،.؟!:\-_])/i
+];
+
+function normalizeForProfanityCheck(raw) {
+  return String(raw || '')
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '') // Arabic harakat + tatweel
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/[@]/g, 'a')
+    .replace(/[$]/g, 's')
+    .replace(/!/g, 'i')
+    .replace(/(.)\1{2,}/g, '$1$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function containsProfanity(raw) {
+  const normalized = normalizeForProfanityCheck(raw);
+  if (!normalized) return false;
+  return PROFANITY_REGEX_LIST.some((re) => re.test(normalized));
+}
+
+export function assertCleanText(raw, errorMsg) {
+  if (containsProfanity(raw)) {
+    throw new Error(
+      errorMsg ||
+        'تم حظر الإرسال لاحتواء النص على ألفاظ غير لائقة. يرجى الالتزام بآداب الحوار الجامعي.'
+    );
+  }
+}
+
+// --- Client-side Image Compression for Inline Attachments (< 500 KB) ---
+
+export async function compressImageFileToBase64(file, maxBase64Chars = 640_000, maxDim = 1280) {
+  if (!file) throw new Error('No image selected.');
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const detected = detectMagicMimeType(bytes, file.name);
+  if (!detected || !detected.mimeType.startsWith('image/')) {
+    throw new Error('Only verified PNG or JPEG images are allowed.');
+  }
+
+  const rawBase64 = uint8ToBase64(bytes);
+  if (rawBase64.length <= maxBase64Chars) {
+    return {
+      base64: rawBase64,
+      mimeType: detected.mimeType,
+      fileName: sanitizeText(file.name).slice(0, 140) || `image.${detected.ext}`
+    };
+  }
+
+  const blobUrl = URL.createObjectURL(new Blob([bytes], { type: detected.mimeType }));
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Failed to read selected image.'));
+      el.src = blobUrl;
+    });
+
+    const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+    const width = Math.max(1, Math.round(img.width * scale));
+    const height = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, width, height);
+
+    for (const quality of [0.82, 0.68, 0.52, 0.38]) {
+      const dataUrl = canvas.toDataURL('image/jpeg', quality);
+      const b64 = dataUrl.split(',')[1] || '';
+      if (b64.length <= maxBase64Chars) {
+        const cleanName = (sanitizeText(file.name).replace(/\.[^.]+$/, '') || 'image') + '.jpg';
+        return {
+          base64: b64,
+          mimeType: 'image/jpeg',
+          fileName: cleanName.slice(0, 140)
+        };
+      }
+    }
+    throw new Error('Image is too large even after compression. Choose a smaller image.');
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
+// --- Clean AI Tutor Math & Markdown Output (removes raw LaTeX like $$50\ \Omega$$) ---
+
+export function formatAiReadableText(raw) {
+  let text = String(raw || '');
+  if (!text) return '';
+
+  // Remove math delimiters
+  text = text
+    .replace(/\$\$([\s\S]*?)\$\$/g, '$1')
+    .replace(/\$([^$\n]+?)\$/g, '$1')
+    .replace(/\\\[([\s\S]*?)\\\]/g, '$1')
+    .replace(/\\\(([\s\S]*?)\\\)/g, '$1');
+
+  // Common LaTeX commands -> clean Unicode
+  for (let i = 0; i < 3; i++) {
+    text = text
+      .replace(/\\(?:d?frac)\{([^{}]+)\}\{([^{}]+)\}/g, '($1 ÷ $2)')
+      .replace(/\\sqrt\{([^{}]+)\}/g, '√($1)')
+      .replace(/\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^{}]*)\}/g, '$1');
+  }
+
+  text = text
+    .replace(/\\Omega\b/g, 'Ω')
+    .replace(/\\mu\b/g, 'μ')
+    .replace(/\\alpha\b/g, 'α')
+    .replace(/\\beta\b/g, 'β')
+    .replace(/\\gamma\b/g, 'γ')
+    .replace(/\\theta\b/g, 'θ')
+    .replace(/\\phi\b/g, 'φ')
+    .replace(/\\pi\b/g, 'π')
+    .replace(/\\Delta\b/g, 'Δ')
+    .replace(/\\lambda\b/g, 'λ')
+    .replace(/\\times\b/g, '×')
+    .replace(/\\cdot\b/g, '·')
+    .replace(/\\div\b/g, '÷')
+    .replace(/\\pm\b/g, '±')
+    .replace(/\\approx\b/g, '≈')
+    .replace(/\\neq\b/g, '≠')
+    .replace(/\\leq\b/g, '≤')
+    .replace(/\\geq\b/g, '≥')
+    .replace(/\\degree\b|\^\\circ/g, '°')
+    .replace(/\\to\b|\\rightarrow\b/g, '←')
+    .replace(/\^\{2\}|\^2\b/g, '²')
+    .replace(/\^\{3\}|\^3\b/g, '³')
+    .replace(/\\[,;:! ]/g, ' ')
+    .replace(/\\left\b|\\right\b/g, '')
+    .replace(/([A-Za-z0-9])_\{([^{}]+)\}/g, '$1($2)')
+    .replace(/([A-Za-z])_([A-Za-z0-9])\b/g, '$1($2)')
+    .replace(/\{([^{}\n]+)\}/g, '$1');
+
+  // Clean Markdown clutter (### headings, **bold**, --- separators, * bullets)
+  text = text
+    .replace(/^[ \t]*#{1,6}[ \t]*(.+)$/gm, '$1')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/^[ \t]*[-*_]{3,}[ \t]*$/gm, '')
+    .replace(/^[ \t]*\*[ \t]+/gm, '• ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  return text;
+}

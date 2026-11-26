@@ -1,8 +1,11 @@
 import { deleteApp, getApps, initializeApp } from 'firebase/app';
+import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 import {
   browserLocalPersistence,
   getAuth,
   GoogleAuthProvider,
+  indexedDBLocalPersistence,
+  initializeAuth,
   setPersistence,
   signInWithPopup,
   signInWithRedirect,
@@ -38,7 +41,9 @@ export function getFirebaseRuntimeConfig() {
     firestoreDatabaseId:
       override.firestoreDatabaseId ||
       BUILD_DEFAULTS.firestoreDatabaseId ||
-      'ai-studio-android-unicore-9b169dd7-0f78-40f7-9411-0587832d12de'
+      'ai-studio-android-unicore-9b169dd7-0f78-40f7-9411-0587832d12de',
+    webRecaptchaKey: override.webRecaptchaKey || BUILD_DEFAULTS.webRecaptchaKey || '',
+    appCheckDebugToken: override.appCheckDebugToken || BUILD_DEFAULTS.appCheckDebugToken || ''
   };
 }
 
@@ -71,8 +76,32 @@ export function getFirebaseClients() {
   }
 
   const app = getApps().length > 0 ? getApps()[0] : initializeApp(firebaseOptions);
-  const auth = getAuth(app);
-  setPersistence(auth, browserLocalPersistence).catch(() => {});
+
+  if (cfg.appCheckDebugToken || cfg.webRecaptchaKey) {
+    try {
+      if (cfg.appCheckDebugToken && typeof window !== 'undefined') {
+        window.FIREBASE_APPCHECK_DEBUG_TOKEN = cfg.appCheckDebugToken;
+      }
+      initializeAppCheck(app, {
+        provider: new ReCaptchaV3Provider(
+          cfg.webRecaptchaKey || '6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI'
+        ),
+        isTokenAutoRefreshEnabled: true
+      });
+    } catch {
+      // Ignore if App Check already initialized
+    }
+  }
+
+  let auth;
+  try {
+    auth = initializeAuth(app, {
+      persistence: [indexedDBLocalPersistence, browserLocalPersistence]
+    });
+  } catch {
+    auth = getAuth(app);
+    setPersistence(auth, browserLocalPersistence).catch(() => {});
+  }
 
   let db;
   try {

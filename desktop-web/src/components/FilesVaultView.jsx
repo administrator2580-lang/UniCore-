@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { ExternalLink, FileText, Image as ImageIcon, Paperclip, ShieldCheck } from 'lucide-react';
-import { recordVerifiedVaultFile } from '../data/firestoreService';
-import { loadVaultBlob, saveVaultBlob, triggerBrowserFileOpen } from '../data/vaultStorage';
+import { ExternalLink, FileText, Image as ImageIcon, Paperclip, ShieldCheck, Trash2 } from 'lucide-react';
+import { deleteVerifiedVaultFile, recordVerifiedVaultFile } from '../data/firestoreService';
+import { loadVaultBlob, removeVaultBlob, saveVaultBlob, triggerBrowserFileOpen } from '../data/vaultStorage';
 
 export default function FilesVaultView({ strings, db, auth, files, onShowToast }) {
   const [busy, setBusy] = useState(false);
@@ -42,6 +42,18 @@ export default function FilesVaultView({ strings, db, auth, files, onShowToast }
       return;
     }
     triggerBrowserFileOpen(cached.bytes, cached.mimeType || fileRecord.mimeType, fileRecord.originalName);
+  };
+
+  const handleDelete = async (fileRecord) => {
+    try {
+      await deleteVerifiedVaultFile(db, auth, fileRecord.id);
+      if (fileRecord.sha256Hex) {
+        await removeVaultBlob(fileRecord.sha256Hex);
+      }
+      onShowToast(`${strings.deleteLabel}: ${fileRecord.originalName}`);
+    } catch (err) {
+      onShowToast(err.message);
+    }
   };
 
   return (
@@ -92,10 +104,21 @@ export default function FilesVaultView({ strings, db, auth, files, onShowToast }
                   </div>
                 </div>
               </div>
-              <button type="button" className="btn btn-tonal" onClick={() => handleOpenSaved(file)}>
-                <ExternalLink size={15} />
-                <span>{strings.openVaultFile}</span>
-              </button>
+              <div className="row-gap">
+                <button type="button" className="btn btn-tonal" onClick={() => handleOpenSaved(file)}>
+                  <ExternalLink size={15} />
+                  <span>{strings.openVaultFile}</span>
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  style={{ color: 'var(--error)' }}
+                  onClick={() => handleDelete(file)}
+                  title={strings.deleteLabel}
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
             </div>
           </div>
         ))

@@ -9,13 +9,16 @@ import com.example.data.model.AuditSeverity
 import com.example.data.model.DriveFolderLink
 import com.example.data.model.NotificationCategory
 import com.example.data.model.RoleInvite
+import com.example.data.model.StudyChatMessage
 import com.example.data.model.SupportChannel
 import com.example.data.model.SupportMessage
 import com.example.data.model.SystemSettings
 import com.example.data.model.UniNotification
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
+import com.example.security.ImageAttachmentHelper
 import com.example.security.InputValidator
+import com.example.security.ProfanityFilter
 import kotlinx.coroutines.flow.combine
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
@@ -422,6 +425,53 @@ class UniCoreGovernanceRepository(
         }
     }
 
+    suspend fun setUserTimedBan(
+        targetUser: UserProfile,
+        durationMinutes: Long,
+        reason: String
+    ): Result<Unit> {
+        val cleanUid = when (val r = InputValidator.validateId(targetUser.userId)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val docPath = "users/$cleanUid"
+        return try {
+            val actorUid = requireUserId()
+            if (cleanUid == actorUid) {
+                return Result.failure(IllegalArgumentException("You cannot ban your own account."))
+            }
+            ProfanityFilter.assertCleanText(reason)
+            val cleanReason = InputValidator.sanitizeText(reason).take(200)
+            val mins = durationMinutes.coerceAtLeast(0L)
+            val banUntilMillis = if (mins > 0L) System.currentTimeMillis() + mins * 60_000L else 0L
+
+            db.collection("users").document(cleanUid).update(
+                mapOf(
+                    "banUntilMillis" to banUntilMillis,
+                    "banReason" to if (mins > 0L) cleanReason.ifBlank { "مخالفة قواعد الاستخدام" } else "",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            logAuditEvent(
+                action = "ACCOUNT_BANNED",
+                severity = if (mins > 0L) AuditSeverity.HIGH else AuditSeverity.INFO,
+                targetPath = docPath,
+                details = if (mins > 0L) {
+                    "Banned ${targetUser.displayName} for $mins minutes (${cleanReason.ifBlank { "policy violation" }})."
+                } else {
+                    "Lifted temporary ban for ${targetUser.displayName}."
+                }
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
     suspend fun saveDepartment(
         existingDeptId: String?,
         rawName: String,
@@ -588,7 +638,8 @@ class UniCoreGovernanceRepository(
         channel: SupportChannel,
         senderRole: UserRole,
         rawSubject: String,
-        rawBody: String
+        rawBody: String,
+        attachment: ImageAttachmentHelper.CompressedImage? = null
     ): Result<Unit> {
         val cleanSubject = when (val r = InputValidator.validateBoundedText(rawSubject, "Subject", 2, 100)) {
             is InputValidator.ValidationResult.Valid -> r.value
@@ -608,19 +659,24 @@ class UniCoreGovernanceRepository(
                 .let { if (it.length < 2) "User" else it }
 
             val safeSenderRole = if (senderRole == UserRole.ADMIN) UserRole.ADMIN.name else UserRole.STUDENT.name
-            db.collection("support_messages").document(msgId).set(
-                mapOf(
-                    "channel" to channel.name,
-                    "senderUid" to uid,
-                    "senderName" to senderName,
-                    "senderRole" to safeSenderRole,
-                    "subject" to cleanSubject,
-                    "body" to cleanBody,
-                    "status" to "OPEN",
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val payload = mutableMapOf<String, Any>(
+                "channel" to channel.name,
+                "senderUid" to uid,
+                "senderName" to senderName,
+                "senderRole" to safeSenderRole,
+                "subject" to cleanSubject,
+                "body" to cleanBody,
+                "status" to "OPEN",
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (attachment != null) {
+                payload["attachmentBase64"] = attachment.base64
+                payload["attachmentMimeType"] = attachment.mimeType
+                payload["attachmentName"] = attachment.fileName
+            }
+
+            db.collection("support_messages").document(msgId).set(payload).await()
 
             logAuditEvent(
                 action = "SUPPORT_MESSAGE_SENT",
@@ -639,7 +695,8 @@ class UniCoreGovernanceRepository(
 
     suspend fun replyToSupportMessage(
         message: SupportMessage,
-        rawReply: String
+        rawReply: String,
+        attachment: ImageAttachmentHelper.CompressedImage? = null
     ): Result<Unit> {
         val cleanReply = when (val r = InputValidator.validateBoundedText(rawReply, "Reply", 1, 800)) {
             is InputValidator.ValidationResult.Valid -> r.value
@@ -653,15 +710,20 @@ class UniCoreGovernanceRepository(
                 .ifBlank { "Administrator" }
                 .let { if (it.length < 2) "Admin" else it }
 
-            db.collection("support_messages").document(message.id).update(
-                mapOf(
-                    "status" to "REPLIED",
-                    "replyText" to cleanReply,
-                    "repliedByUid" to uid,
-                    "repliedByName" to replierName,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val updates = mutableMapOf<String, Any>(
+                "status" to "REPLIED",
+                "replyText" to cleanReply,
+                "repliedByUid" to uid,
+                "repliedByName" to replierName,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (attachment != null) {
+                updates["replyAttachmentBase64"] = attachment.base64
+                updates["replyAttachmentMimeType"] = attachment.mimeType
+                updates["replyAttachmentName"] = attachment.fileName
+            }
+
+            db.collection("support_messages").document(message.id).update(updates).await()
 
             sendNotification(
                 title = "Reply: ${message.subject}",
@@ -674,6 +736,113 @@ class UniCoreGovernanceRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    // --- Department & Academic Year Group Chat ---
+
+    fun buildChatRoomId(departmentId: String?, yearIndex: Int?): String {
+        if (departmentId.isNullOrBlank() || yearIndex == null) return "general"
+        return "dept_${departmentId}_y_$yearIndex"
+    }
+
+    fun observeChatMessages(roomId: String): Flow<List<StudyChatMessage>> = flow {
+        val uid = requireUserId()
+        val safeRoomId = if (roomId.matches(Regex("^[a-zA-Z0-9_\\-]{1,128}$"))) roomId else "general"
+        val path = "chat_rooms/$safeRoomId/messages"
+        emitAll(
+            db.collection("chat_rooms").document(safeRoomId).collection("messages")
+                .orderBy("createdAt", Query.Direction.DESCENDING)
+                .limit(80)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(StudyChatMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .reversed()
+                }
+                .catch { error ->
+                    unwrapAndLog(error, OperationType.LIST, path, uid)
+                    throw error
+                }
+        )
+    }
+
+    suspend fun sendChatMessage(
+        roomId: String,
+        departmentName: String?,
+        academicYear: String?,
+        senderRole: UserRole,
+        rawText: String,
+        attachment: ImageAttachmentHelper.CompressedImage?
+    ): Result<Unit> {
+        val safeRoomId = if (roomId.matches(Regex("^[a-zA-Z0-9_\\-]{1,128}$"))) roomId else "general"
+        val msgId = "chat_${UUID.randomUUID().toString().replace("-", "").take(20)}"
+        val docPath = "chat_rooms/$safeRoomId/messages/$msgId"
+        return try {
+            val uid = requireUserId()
+            ProfanityFilter.assertCleanText(rawText)
+            if (InputValidator.containsInjectionPayload(rawText)) {
+                return Result.failure(IllegalArgumentException("Message contains disallowed syntax."))
+            }
+            val cleanText = InputValidator.sanitizeText(rawText).take(800)
+            if (cleanText.isBlank() && attachment == null) {
+                return Result.failure(IllegalArgumentException("Enter a message or attach an image."))
+            }
+
+            val senderName = InputValidator.sanitizeText(auth.currentUser?.displayName ?: "UniCore User")
+                .take(60)
+                .ifBlank { "UniCore User" }
+                .let { if (it.length < 2) "User" else it }
+
+            val payload = mutableMapOf<String, Any>(
+                "roomId" to safeRoomId,
+                "senderUid" to uid,
+                "senderName" to senderName,
+                "senderRole" to senderRole.name,
+                "text" to cleanText,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+            if (!departmentName.isNullOrBlank()) {
+                payload["departmentName"] = InputValidator.sanitizeText(departmentName).take(80)
+            }
+            if (!academicYear.isNullOrBlank()) {
+                payload["academicYear"] = InputValidator.sanitizeText(academicYear).take(40)
+            }
+            if (attachment != null) {
+                payload["attachmentBase64"] = attachment.base64
+                payload["attachmentMimeType"] = attachment.mimeType
+                payload["attachmentName"] = attachment.fileName
+            }
+
+            db.collection("chat_rooms").document(safeRoomId).collection("messages").document(msgId)
+                .set(payload).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteChatMessage(roomId: String, messageId: String): Result<Unit> {
+        val safeRoomId = if (roomId.matches(Regex("^[a-zA-Z0-9_\\-]{1,128}$"))) roomId else "general"
+        val docPath = "chat_rooms/$safeRoomId/messages/$messageId"
+        return try {
+            requireUserId()
+            db.collection("chat_rooms").document(safeRoomId).collection("messages").document(messageId)
+                .delete().await()
+            logAuditEvent(
+                action = "CHAT_MESSAGE_DELETED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Deleted chat message."
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
             Result.failure(e)
         }
     }

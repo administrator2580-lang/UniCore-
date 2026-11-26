@@ -16,8 +16,10 @@ import {
   where
 } from 'firebase/firestore';
 import {
+  assertCleanText,
   base64ToUint8,
   CHUNK_RAW_BYTES,
+  compressImageFileToBase64,
   extractGoogleDriveFolder,
   isValidId,
   MAX_INLINE_COURSE_FILE_BYTES,
@@ -454,6 +456,7 @@ export function subscribeAuditLogs(db, onData, onError) {
 // --- Write Operations ---
 
 export async function sendNotification(db, auth, { title, body, category = 'ANNOUNCEMENT', targetUid = 'ALL' }) {
+  assertCleanText(`${title} ${body}`);
   const tRes = validateBoundedText(title, 'Notification title', 2, 100);
   if (!tRes.valid) throw new Error(tRes.reason);
   const bRes = validateBoundedText(body, 'Notification message', 2, 400);
@@ -487,6 +490,7 @@ export async function createCourseWithOptionalFile(
 ) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Sign in required.');
+  assertCleanText(`${title} ${description}`);
   const tRes = validateBoundedText(title, 'Course title', 3, 100);
   if (!tRes.valid) throw new Error(tRes.reason);
   const dRes = validateBoundedText(description, 'Description', 1, 600);
@@ -570,6 +574,7 @@ export async function createCourseWithOptionalFile(
 }
 
 export async function updateCourseDetails(db, { courseId, title, description, departmentId, departmentName, academicYear }) {
+  assertCleanText(`${title} ${description}`);
   const tRes = validateBoundedText(title, 'Course title', 3, 100);
   if (!tRes.valid) throw new Error(tRes.reason);
   const dRes = validateBoundedText(description, 'Description', 1, 600);
@@ -644,6 +649,7 @@ export async function downloadCourseAttachmentBytes(db, course) {
 export async function saveDepartment(db, auth, { existingDeptId, name, years }) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(`${name} ${(years || []).join(' ')}`);
   const nRes = validateBoundedText(name, 'Department name', 2, 80);
   if (!nRes.valid) throw new Error(nRes.reason);
 
@@ -696,6 +702,7 @@ export async function deleteDepartment(db, auth, deptId) {
 export async function linkDriveFolder(db, auth, { title, folderUrl, departmentId, departmentName, academicYear }) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(title);
   const tRes = validateBoundedText(title, 'Folder title', 2, 100);
   if (!tRes.valid) throw new Error(tRes.reason);
   const dRes = extractGoogleDriveFolder(folderUrl);
@@ -744,16 +751,22 @@ export async function unlinkDriveFolder(db, folderId) {
 
 // --- Quizzes ---
 
-export async function createQuizWithAnswerKey(db, auth, { courseId, title, durationMinutes, prompts, optionBlocks, correctIndices }) {
+export async function createQuizWithAnswerKey(
+  db,
+  auth,
+  { courseId, title, durationMinutes, startAtMillis = 0, endAtMillis = 0, imageFile = null, prompts, optionBlocks, correctIndices }
+) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Not authenticated.');
   if (!courseId) throw new Error('Select a course first.');
+  assertCleanText(title);
   const tRes = validateBoundedText(title, 'Quiz title', 3, 100);
   if (!tRes.valid) throw new Error(tRes.reason);
 
   const cleanPrompts = [];
   for (const p of prompts || []) {
-    const r = validateBoundedText(p, 'Question', 5, 250);
+    assertCleanText(p);
+    const r = validateBoundedText(p, 'Question', 3, 250);
     if (!r.valid) throw new Error(r.reason);
     cleanPrompts.push(r.value);
   }
@@ -762,11 +775,13 @@ export async function createQuizWithAnswerKey(db, auth, { courseId, title, durat
   }
 
   const cleanOptionBlocks = optionBlocks.map((block) => {
+    assertCleanText(block);
     const opts = String(block)
       .split('|')
       .map((s) => sanitizeText(s).slice(0, 80))
       .filter(Boolean);
     if (opts.length < 2) throw new Error('Each question needs at least 2 options.');
+    if (opts.length > 6) throw new Error('Maximum 6 options per question.');
     return opts.join('|');
   });
 
@@ -775,29 +790,75 @@ export async function createQuizWithAnswerKey(db, auth, { courseId, title, durat
     return Math.max(0, Math.min(Number(idx) || 0, count - 1));
   });
 
+  const startMs = Math.max(0, Number(startAtMillis) || 0);
+  const endMs = Math.max(0, Number(endAtMillis) || 0);
+  if (startMs > 0 && endMs > 0 && endMs <= startMs) {
+    throw new Error('Quiz closing time must be after opening time.');
+  }
+
+  let imgMeta = null;
+  const imgChunks = [];
+  if (imageFile) {
+    const compressed = await compressImageFileToBase64(imageFile, 1_500_000, 1400);
+    const chunkLen = 450_000;
+    for (let pos = 0; pos < compressed.base64.length; pos += chunkLen) {
+      imgChunks.push(compressed.base64.slice(pos, pos + chunkLen));
+    }
+    if (imgChunks.length > 4) {
+      throw new Error('Quiz image exceeds maximum chunk size.');
+    }
+    imgMeta = compressed;
+  }
+
   const mins = Math.max(1, Math.min(180, Number(durationMinutes) || 15));
   const quizRef = doc(collection(db, 'quizzes'));
 
-  await setDoc(quizRef, {
+  const payload = {
     courseId,
     title: tRes.value,
     durationMinutes: mins,
     questionPrompts: cleanPrompts,
     optionBlocks: cleanOptionBlocks,
-    published: true,
+    hasImage: Boolean(imgMeta),
+    published: !imgMeta,
     createdBy: uid,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp()
-  });
+  };
+  if (startMs > 0) payload.startAtMillis = startMs;
+  if (endMs > 0) payload.endAtMillis = endMs;
+  if (imgMeta) {
+    payload.imageName = imgMeta.fileName;
+    payload.imageMimeType = imgMeta.mimeType;
+    payload.chunkCount = imgChunks.length;
+  }
 
-  await setDoc(doc(db, 'quizzes', quizRef.id, 'private', 'answer_key'), {
-    quizId: quizRef.id,
-    correctIndices: safeCorrect,
-    passingScore: 70,
-    updatedBy: uid,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp()
-  });
+  await setDoc(quizRef, payload);
+
+  try {
+    if (imgMeta) {
+      for (let i = 0; i < imgChunks.length; i++) {
+        await setDoc(doc(db, 'quizzes', quizRef.id, 'assets', String(i)), {
+          chunkIndex: i,
+          data: imgChunks[i],
+          createdAt: serverTimestamp()
+        });
+      }
+      await updateDoc(quizRef, { published: true, updatedAt: serverTimestamp() });
+    }
+
+    await setDoc(doc(db, 'quizzes', quizRef.id, 'private', 'answer_key'), {
+      quizId: quizRef.id,
+      correctIndices: safeCorrect,
+      passingScore: 70,
+      updatedBy: uid,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  } catch (err) {
+    await deleteQuiz(db, quizRef.id).catch(() => {});
+    throw err;
+  }
 
   await incrementDailyCounter(db, uid, false);
   await sendNotification(db, auth, {
@@ -808,11 +869,29 @@ export async function createQuizWithAnswerKey(db, auth, { courseId, title, durat
   });
 }
 
+export async function loadQuizImageDataUrl(db, quiz) {
+  if (!quiz?.hasImage || !quiz?.chunkCount) return null;
+  const snap = await getDocs(collection(db, 'quizzes', quiz.id, 'assets'));
+  const ordered = snap.docs
+    .map((d) => ({ idx: Number(d.data().chunkIndex ?? d.id), data: d.data().data }))
+    .filter((x) => !Number.isNaN(x.idx) && typeof x.data === 'string')
+    .sort((a, b) => a.idx - b.idx);
+  if (ordered.length === 0) return null;
+  const base64 = ordered.map((x) => x.data).join('');
+  return `data:${quiz.imageMimeType || 'image/jpeg'};base64,${base64}`;
+}
+
 export async function deleteQuiz(db, quizId) {
   try {
     await deleteDoc(doc(db, 'quizzes', quizId, 'private', 'answer_key'));
   } catch {
     // Ignore if already absent
+  }
+  try {
+    const assetsSnap = await getDocs(collection(db, 'quizzes', quizId, 'assets'));
+    await Promise.all(assetsSnap.docs.map((d) => deleteDoc(d.ref)));
+  } catch {
+    // Ignore
   }
   await deleteDoc(doc(db, 'quizzes', quizId));
 }
@@ -846,6 +925,54 @@ export async function submitQuizAttempt(db, auth, { quiz, selectedIndices }) {
     `Student submitted quiz '${quiz.title}' for verification.`
   );
   await incrementDailyCounter(db, uid, false);
+}
+
+export async function cancelQuizForViolation(db, auth, { quiz, selectedIndices, reason }) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) return;
+  const attemptId = `${uid}_${quiz.id}`;
+  let studentName = sanitizeText(auth.currentUser?.displayName || 'Student').slice(0, 60);
+  if (studentName.length < 2) studentName = 'Student';
+  const cleanReason = sanitizeText(reason || 'Left the application during an active quiz.').slice(0, 200);
+  const safeIndices =
+    Array.isArray(selectedIndices) && selectedIndices.length > 0
+      ? selectedIndices.map((n) => Number(n) || 0)
+      : [0];
+
+  await setDoc(doc(db, 'quiz_attempts', attemptId), {
+    userId: uid,
+    studentName,
+    quizId: quiz.id,
+    quizTitle: String(quiz.title || 'Quiz').slice(0, 100),
+    selectedIndices: safeIndices,
+    status: 'CANCELLED_VIOLATION',
+    score: 0,
+    graded: true,
+    cancellationReason: cleanReason.length >= 3 ? cleanReason : 'Left app during quiz',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  await logAuditEvent(
+    db,
+    auth,
+    'QUIZ_VIOLATION_CANCELLED',
+    'HIGH',
+    `quiz_attempts/${attemptId}`,
+    `Quiz '${quiz.title}' cancelled for violation: ${cleanReason}`
+  );
+}
+
+export async function resetCancelledAttemptAsSuperAdmin(db, auth, attempt) {
+  await deleteDoc(doc(db, 'quiz_attempts', attempt.id));
+  await logAuditEvent(
+    db,
+    auth,
+    'QUIZ_VIOLATION_CANCELLED',
+    'INFO',
+    `quiz_attempts/${attempt.id}`,
+    `Super Admin unlocked cancelled attempt for ${attempt.studentName}.`
+  );
 }
 
 export async function gradeQuizAttemptAsAdmin(db, auth, attempt) {
@@ -921,7 +1048,13 @@ export async function recordVerifiedVaultFile(db, auth, file) {
   return { fileId: fileRef.id, validated };
 }
 
-// --- Accounts, Invites, Support, Settings ---
+export async function deleteVerifiedVaultFile(db, auth, fileId) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated.');
+  await deleteDoc(doc(db, 'users', uid, 'files', fileId));
+}
+
+// --- Accounts, Invites, Support, Chat, Settings ---
 
 export async function inviteAccountByEmail(db, auth, { rawEmail, rawNameHint, assignedRole }) {
   const email = String(rawEmail || '').trim().toLowerCase();
@@ -931,6 +1064,7 @@ export async function inviteAccountByEmail(db, auth, { rawEmail, rawNameHint, as
   if (assignedRole === 'SUPER_ADMIN') {
     throw new Error('Super Admin role cannot be assigned via invite.');
   }
+  assertCleanText(rawNameHint);
   const nRes = validateBoundedText(rawNameHint, 'Name', 2, 60);
   if (!nRes.valid) throw new Error(nRes.reason);
 
@@ -1047,9 +1181,38 @@ export async function setUserAccountDisabled(db, auth, targetUser, disabled) {
   );
 }
 
-export async function sendSupportMessage(db, auth, { userRole, subject, body }) {
+export async function setUserTimedBan(db, auth, targetUser, durationMinutes, reason) {
+  const actorUid = auth.currentUser?.uid;
+  if (targetUser.userId === actorUid) {
+    throw new Error('You cannot ban your own account.');
+  }
+  assertCleanText(reason || '');
+  const cleanReason = sanitizeText(reason || '').slice(0, 200);
+  const mins = Math.max(0, Number(durationMinutes) || 0);
+  const banUntilMillis = mins > 0 ? Date.now() + mins * 60_000 : 0;
+
+  await updateDoc(doc(db, 'users', targetUser.userId), {
+    banUntilMillis,
+    banReason: mins > 0 ? (cleanReason || 'مخالفة قواعد الاستخدام') : '',
+    updatedAt: serverTimestamp()
+  });
+
+  await logAuditEvent(
+    db,
+    auth,
+    'ACCOUNT_BANNED',
+    mins > 0 ? 'HIGH' : 'INFO',
+    `users/${targetUser.userId}`,
+    mins > 0
+      ? `Banned ${targetUser.displayName} for ${mins} minutes (${cleanReason || 'policy violation'}).`
+      : `Lifted temporary ban for ${targetUser.displayName}.`
+  );
+}
+
+export async function sendSupportMessage(db, auth, { userRole, subject, body, imageFile = null }) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(`${subject} ${body}`);
   const sRes = validateBoundedText(subject, 'Subject', 2, 100);
   if (!sRes.valid) throw new Error(sRes.reason);
   const bRes = validateBoundedText(body, 'Message', 2, 800);
@@ -1060,6 +1223,16 @@ export async function sendSupportMessage(db, auth, { userRole, subject, body }) 
   let senderName = sanitizeText(auth.currentUser?.displayName || 'UniCore User').slice(0, 60);
   if (senderName.length < 2) senderName = 'User';
 
+  let imgPayload = {};
+  if (imageFile) {
+    const compressed = await compressImageFileToBase64(imageFile, 640_000, 1280);
+    imgPayload = {
+      attachmentBase64: compressed.base64,
+      attachmentMimeType: compressed.mimeType,
+      attachmentName: compressed.fileName
+    };
+  }
+
   const msgId = makeShortId('msg');
   await setDoc(doc(db, 'support_messages', msgId), {
     channel,
@@ -1068,6 +1241,7 @@ export async function sendSupportMessage(db, auth, { userRole, subject, body }) 
     senderRole,
     subject: sRes.value,
     body: bRes.value,
+    ...imgPayload,
     status: 'OPEN',
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp()
@@ -1083,18 +1257,30 @@ export async function sendSupportMessage(db, auth, { userRole, subject, body }) 
   );
 }
 
-export async function replyToSupportMessage(db, auth, { message, replyText }) {
+export async function replyToSupportMessage(db, auth, { message, replyText, imageFile = null }) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(replyText);
   const rRes = validateBoundedText(replyText, 'Reply', 1, 800);
   if (!rRes.valid) throw new Error(rRes.reason);
 
   let replierName = sanitizeText(auth.currentUser?.displayName || 'Administrator').slice(0, 60);
   if (replierName.length < 2) replierName = 'Admin';
 
+  let imgPayload = {};
+  if (imageFile) {
+    const compressed = await compressImageFileToBase64(imageFile, 640_000, 1280);
+    imgPayload = {
+      replyAttachmentBase64: compressed.base64,
+      replyAttachmentMimeType: compressed.mimeType,
+      replyAttachmentName: compressed.fileName
+    };
+  }
+
   await updateDoc(doc(db, 'support_messages', message.id), {
     status: 'REPLIED',
     replyText: rRes.value,
+    ...imgPayload,
     repliedByUid: uid,
     repliedByName: replierName,
     updatedAt: serverTimestamp()
@@ -1106,6 +1292,82 @@ export async function replyToSupportMessage(db, auth, { message, replyText }) {
     category: 'ANNOUNCEMENT',
     targetUid: message.senderUid
   });
+}
+
+// --- Student & Department Group Chat ---
+
+export function buildChatRoomId(departmentId, yearIndex) {
+  if (!departmentId || yearIndex === null || yearIndex === undefined) return 'general';
+  return `dept_${departmentId}_y_${yearIndex}`;
+}
+
+export function subscribeChatMessages(db, roomId, onData, onError) {
+  const q = query(
+    collection(db, 'chat_rooms', roomId, 'messages'),
+    orderBy('createdAt', 'desc'),
+    limit(80)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .reverse();
+      onData(list);
+    },
+    onError
+  );
+}
+
+export async function sendChatMessage(
+  db,
+  auth,
+  { roomId, departmentName = '', academicYear = '', userRole, text, imageFile = null }
+) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(text);
+  const cleanText = sanitizeText(text || '').slice(0, 800);
+  if (!cleanText && !imageFile) {
+    throw new Error('Enter a message or attach an image.');
+  }
+
+  let senderName = sanitizeText(auth.currentUser?.displayName || 'UniCore User').slice(0, 60);
+  if (senderName.length < 2) senderName = 'User';
+
+  const payload = {
+    roomId: isValidId(roomId) ? roomId : 'general',
+    senderUid: uid,
+    senderName,
+    senderRole: ['STUDENT', 'ADMIN', 'SUPER_ADMIN'].includes(userRole) ? userRole : 'STUDENT',
+    text: cleanText,
+    createdAt: serverTimestamp()
+  };
+
+  if (departmentName) payload.departmentName = sanitizeText(departmentName).slice(0, 80);
+  if (academicYear) payload.academicYear = sanitizeText(academicYear).slice(0, 40);
+
+  if (imageFile) {
+    const compressed = await compressImageFileToBase64(imageFile, 640_000, 1280);
+    payload.attachmentBase64 = compressed.base64;
+    payload.attachmentMimeType = compressed.mimeType;
+    payload.attachmentName = compressed.fileName;
+  }
+
+  const msgId = makeShortId('chat');
+  await setDoc(doc(db, 'chat_rooms', payload.roomId, 'messages', msgId), payload);
+}
+
+export async function deleteChatMessage(db, auth, roomId, messageId) {
+  await deleteDoc(doc(db, 'chat_rooms', roomId, 'messages', messageId));
+  await logAuditEvent(
+    db,
+    auth,
+    'CHAT_MESSAGE_DELETED',
+    'INFO',
+    `chat_rooms/${roomId}/messages/${messageId}`,
+    'Deleted chat message.'
+  );
 }
 
 export async function updateSystemSettingsAsSuperAdmin(db, auth, { dailyAiLimit, dailyWriteLimit, aiEnabled, zeroCostLockActive }) {

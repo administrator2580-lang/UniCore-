@@ -7,13 +7,16 @@ const path = require('node:path');
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['https:']);
 const ALLOWED_GOOGLE_HOSTS = new Set([
   'drive.google.com',
+  'drive.usercontent.google.com',
   'docs.google.com',
   'accounts.google.com'
 ]);
+const PREFERRED_STATIC_PORTS = [45821, 45822, 45823, 0];
 const BLOCKED_EXTENSIONS = new Set([
   'exe', 'apk', 'dex', 'jar', 'so', 'sh', 'bat', 'cmd', 'js', 'vbs', 'ps1', 'msi', 'elf', 'scr', 'com'
 ]);
-const MAX_DRIVE_DOWNLOAD_BYTES = 15 * 1024 * 1024;
+const MAX_DRIVE_DOWNLOAD_BYTES = 20 * 1024 * 1024;
+const MAX_INLINE_PREVIEW_BYTES = 10 * 1024 * 1024;
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -40,7 +43,11 @@ function sanitizeUserAgent(rawUa) {
 function isAllowedGoogleDownloadHost(hostname) {
   const lower = String(hostname || '').toLowerCase();
   if (ALLOWED_GOOGLE_HOSTS.has(lower)) return true;
-  return lower.endsWith('.googleusercontent.com') || lower.endsWith('.googlevideo.com');
+  return (
+    lower.endsWith('.googleusercontent.com') ||
+    lower.endsWith('.usercontent.google.com') ||
+    lower.endsWith('.googlevideo.com')
+  );
 }
 
 function validateHttpsUrl(rawUrl) {
@@ -57,44 +64,61 @@ function validateHttpsUrl(rawUrl) {
   }
 }
 
-function startStaticDistServer(distDir) {
-  return new Promise((resolve, reject) => {
-    const resolvedDist = path.resolve(distDir);
-    const server = http.createServer((req, res) => {
-      try {
-        const reqUrl = new URL(req.url || '/', 'http://127.0.0.1');
-        let relPath = decodeURIComponent(reqUrl.pathname || '/');
-        if (relPath === '/') relPath = '/index.html';
-        const safeRel = relPath.replace(/^\/+/, '');
-        let targetPath = path.resolve(resolvedDist, safeRel);
-        if (!targetPath.startsWith(resolvedDist + path.sep) && targetPath !== resolvedDist) {
-          res.writeHead(403);
-          res.end('Forbidden');
-          return;
-        }
-        if (!fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) {
-          targetPath = path.join(resolvedDist, 'index.html');
-        }
-        const ext = path.extname(targetPath).toLowerCase();
-        res.writeHead(200, {
-          'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
-          'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=86400'
-        });
-        fs.createReadStream(targetPath).pipe(res);
-      } catch {
-        res.writeHead(500);
-        res.end('Server error');
+function createStaticHandler(resolvedDist) {
+  return (req, res) => {
+    try {
+      const reqUrl = new URL(req.url || '/', 'http://127.0.0.1');
+      let relPath = decodeURIComponent(reqUrl.pathname || '/');
+      if (relPath === '/') relPath = '/index.html';
+      const safeRel = relPath.replace(/^\/+/, '');
+      let targetPath = path.resolve(resolvedDist, safeRel);
+      if (!targetPath.startsWith(resolvedDist + path.sep) && targetPath !== resolvedDist) {
+        res.writeHead(403);
+        res.end('Forbidden');
+        return;
       }
+      if (!fs.existsSync(targetPath) || fs.statSync(targetPath).isDirectory()) {
+        targetPath = path.join(resolvedDist, 'index.html');
+      }
+      const ext = path.extname(targetPath).toLowerCase();
+      res.writeHead(200, {
+        'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+        'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=86400'
+      });
+      fs.createReadStream(targetPath).pipe(res);
+    } catch {
+      res.writeHead(500);
+      res.end('Server error');
+    }
+  };
+}
+
+function startStaticDistServer(distDir) {
+  const resolvedDist = path.resolve(distDir);
+  const tryPort = (index) =>
+    new Promise((resolve, reject) => {
+      if (index >= PREFERRED_STATIC_PORTS.length) {
+        reject(new Error('Unable to bind loopback server port.'));
+        return;
+      }
+      const portCandidate = PREFERRED_STATIC_PORTS[index];
+      const server = http.createServer(createStaticHandler(resolvedDist));
+      server.once('error', (err) => {
+        if (err?.code === 'EADDRINUSE' && index + 1 < PREFERRED_STATIC_PORTS.length) {
+          tryPort(index + 1).then(resolve, reject);
+        } else {
+          reject(err);
+        }
+      });
+      // Stable localhost port keeps Firebase Auth IndexedDB/localStorage persistent across restarts
+      server.listen(portCandidate, '127.0.0.1', () => {
+        const address = server.address();
+        staticServer = server;
+        resolve(`http://localhost:${address.port}`);
+      });
     });
 
-    server.on('error', reject);
-    // Bind strictly to loopback; open via localhost:<port> so Firebase Auth recognizes localhost origin
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      staticServer = server;
-      resolve(`http://localhost:${address.port}`);
-    });
-  });
+  return tryPort(0);
 }
 
 function fetchHttpsText(urlString, redirectsLeft = 4) {
@@ -165,7 +189,30 @@ function sanitizeDownloadFileName(rawName, fallback) {
   return cleaned || fallback;
 }
 
-function downloadHttpsBinary(urlString, resolveDestPath, redirectsLeft = 5) {
+function extractDriveConfirmUrl(html, baseUrl) {
+  const formMatch = /<form\b[^>]*action=["']([^"']+)["'][^>]*>([\s\S]*?)<\/form>/i.exec(html);
+  if (formMatch) {
+    try {
+      const target = new URL(formMatch[1].replace(/&amp;/g, '&'), baseUrl);
+      const inputRegex = /<input\b[^>]*name=["']([^"']+)["'][^>]*value=["']([^"']*)["'][^>]*>/gi;
+      let m;
+      while ((m = inputRegex.exec(formMatch[2])) !== null) {
+        target.searchParams.set(m[1], m[2]);
+      }
+      if (!target.searchParams.has('confirm')) target.searchParams.set('confirm', 't');
+      return target.toString();
+    } catch {
+      // ignore
+    }
+  }
+  const hrefMatch = /href=["'](https:\/\/[^"']*confirm=[^"']+)["']/i.exec(html);
+  if (hrefMatch?.[1]) {
+    return hrefMatch[1].replace(/&amp;/g, '&');
+  }
+  return '';
+}
+
+function downloadHttpsBinary(urlString, resolveDestPath, redirectsLeft = 6) {
   return new Promise((resolve, reject) => {
     const parsed = validateHttpsUrl(urlString);
     if (!parsed || !isAllowedGoogleDownloadHost(parsed.hostname)) {
@@ -176,7 +223,7 @@ function downloadHttpsBinary(urlString, resolveDestPath, redirectsLeft = 5) {
     const req = https.get(
       parsed,
       {
-        timeout: 20000,
+        timeout: 25000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36'
         }
@@ -195,8 +242,21 @@ function downloadHttpsBinary(urlString, resolveDestPath, redirectsLeft = 5) {
         }
         const contentType = String(res.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
         if (contentType.startsWith('text/html')) {
-          res.resume();
-          resolve({ fallback: true });
+          const htmlChunks = [];
+          let htmlBytes = 0;
+          res.on('data', (chunk) => {
+            htmlBytes += chunk.length;
+            if (htmlBytes <= 512 * 1024) htmlChunks.push(chunk);
+          });
+          res.on('end', () => {
+            const html = Buffer.concat(htmlChunks).toString('utf8');
+            const confirmUrl = redirectsLeft > 0 ? extractDriveConfirmUrl(html, parsed) : '';
+            if (confirmUrl) {
+              downloadHttpsBinary(confirmUrl, resolveDestPath, redirectsLeft - 1).then(resolve, reject);
+            } else {
+              resolve({ fallback: true });
+            }
+          });
           return;
         }
 
@@ -242,7 +302,7 @@ function downloadHttpsBinary(urlString, resolveDestPath, redirectsLeft = 5) {
           try {
             if (fs.existsSync(destFilePath)) fs.unlinkSync(destFilePath);
             fs.renameSync(tmpPath, destFilePath);
-            resolve({ fallback: false, path: destFilePath, contentType });
+            resolve({ fallback: false, path: destFilePath, contentType, sizeBytes: totalBytes });
           } catch (err) {
             reject(err);
           }
@@ -330,7 +390,7 @@ function parseEmbeddedFolderHtml(html, folder) {
         ? href
         : `https://drive.google.com/file/d/${itemId}/view`;
 
-    let downloadUrl = `https://drive.google.com/uc?export=download&id=${itemId}`;
+    let downloadUrl = `https://drive.usercontent.google.com/download?id=${itemId}&export=download&confirm=t`;
     if (/docs\.google\.com\/document\/d\//i.test(href)) {
       downloadUrl = `https://docs.google.com/document/d/${itemId}/export?format=pdf`;
     } else if (/docs\.google\.com\/presentation\/d\//i.test(href)) {
@@ -369,7 +429,7 @@ function parseEmbeddedFolderHtml(html, folder) {
         name: title,
         isSubFolder: href.toLowerCase().includes('/folders/'),
         viewUrl: href,
-        downloadUrl: `https://drive.google.com/uc?export=download&id=${itemId}`
+        downloadUrl: `https://drive.usercontent.google.com/download?id=${itemId}&export=download&confirm=t`
       });
     }
   }
@@ -381,6 +441,55 @@ function registerIpcHandlers() {
     const dir = path.resolve(app.getPath('userData'), 'course_cache');
     fs.mkdirSync(dir, { recursive: true });
     return dir;
+  };
+
+  const getDownloadsDir = () => {
+    const dir = path.resolve(app.getPath('downloads'), 'UniCore');
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+
+  const saveCopyToDownloads = (srcPath, fileName) => {
+    try {
+      const downloadsDir = getDownloadsDir();
+      const target = path.resolve(downloadsDir, fileName);
+      if (target.startsWith(downloadsDir + path.sep)) {
+        fs.copyFileSync(srcPath, target);
+        return target;
+      }
+    } catch {
+      // Non-fatal
+    }
+    return null;
+  };
+
+  const buildPreviewPayload = (filePath, explicitMimeType) => {
+    try {
+      const stats = fs.statSync(filePath);
+      const ext = path.extname(filePath).toLowerCase();
+      const mimeType =
+        explicitMimeType ||
+        (ext === '.pdf'
+          ? 'application/pdf'
+          : ext === '.png'
+            ? 'image/png'
+            : ext === '.jpg' || ext === '.jpeg'
+              ? 'image/jpeg'
+              : 'application/octet-stream');
+      if (
+        stats.size > 0 &&
+        stats.size <= MAX_INLINE_PREVIEW_BYTES &&
+        (mimeType === 'application/pdf' || mimeType === 'image/png' || mimeType === 'image/jpeg')
+      ) {
+        return {
+          base64: fs.readFileSync(filePath).toString('base64'),
+          mimeType
+        };
+      }
+      return { base64: null, mimeType };
+    } catch {
+      return { base64: null, mimeType: explicitMimeType || 'application/octet-stream' };
+    }
   };
 
   ipcMain.handle('app:runtime-info', () => ({
@@ -424,6 +533,7 @@ function registerIpcHandlers() {
     }
     const fileId = String(item.fileId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128);
     if (!fileId) throw new Error('Invalid Drive file ID.');
+    const openExternally = item.openExternally !== false;
 
     const cacheRoot = getCacheDir();
     const itemCacheDir = path.resolve(cacheRoot, `gdrive_${fileId}`);
@@ -439,37 +549,68 @@ function registerIpcHandlers() {
     });
     if (existing) {
       const existingPath = path.join(itemCacheDir, existing);
-      await shell.openPath(existingPath);
-      return { localPath: existingPath };
+      const downloadsPath = saveCopyToDownloads(existingPath, existing);
+      const preview = buildPreviewPayload(existingPath);
+      if (openExternally) {
+        await shell.openPath(downloadsPath || existingPath);
+      }
+      return {
+        localPath: existingPath,
+        downloadsPath,
+        fileName: existing,
+        mimeType: preview.mimeType,
+        base64: preview.base64
+      };
     }
 
-    const res = await downloadHttpsBinary(item.downloadUrl, ({ headerFileName, contentType }) => {
-      const chosenRaw =
-        headerFileName &&
-        headerFileName.toLowerCase() !== 'download' &&
-        !/^Drive Item/i.test(headerFileName)
-          ? headerFileName
-          : String(item.name || `drive_file_${fileId.slice(0, 8)}`);
-      const safeBase = sanitizeDownloadFileName(chosenRaw, `drive_file_${fileId.slice(0, 8)}`);
-      const ext = safeBase.includes('.') ? safeBase.split('.').pop().toLowerCase() : '';
-      if (ext && BLOCKED_EXTENSIONS.has(ext)) {
-        throw new Error(`Blocked executable extension '.${ext}'.`);
-      }
-      const mimeExt =
-        contentType === 'application/pdf' ? 'pdf' :
-        contentType === 'image/png' ? 'png' :
-        contentType === 'image/jpeg' ? 'jpg' : 'pdf';
-      const finalName = ext && ext.length <= 8 ? safeBase : `${safeBase}.${mimeExt}`;
-      const destPath = path.resolve(itemCacheDir, finalName);
-      if (!destPath.startsWith(itemCacheDir + path.sep)) {
-        throw new Error('Invalid local cache destination.');
-      }
-      return destPath;
-    });
+    const candidates = [
+      item.downloadUrl,
+      `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`,
+      `https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`
+    ].filter((u, idx, arr) => Boolean(u) && arr.indexOf(u) === idx);
+
+    let res = { fallback: true };
+    for (const candidateUrl of candidates) {
+      res = await downloadHttpsBinary(candidateUrl, ({ headerFileName, contentType }) => {
+        const chosenRaw =
+          headerFileName &&
+          headerFileName.toLowerCase() !== 'download' &&
+          !/^Drive Item/i.test(headerFileName)
+            ? headerFileName
+            : String(item.name || `drive_file_${fileId.slice(0, 8)}`);
+        const safeBase = sanitizeDownloadFileName(chosenRaw, `drive_file_${fileId.slice(0, 8)}`);
+        const ext = safeBase.includes('.') ? safeBase.split('.').pop().toLowerCase() : '';
+        if (ext && BLOCKED_EXTENSIONS.has(ext)) {
+          throw new Error(`Blocked executable extension '.${ext}'.`);
+        }
+        const mimeExt =
+          contentType === 'application/pdf' ? 'pdf' :
+          contentType === 'image/png' ? 'png' :
+          contentType === 'image/jpeg' ? 'jpg' : 'pdf';
+        const finalName = ext && ext.length <= 8 ? safeBase : `${safeBase}.${mimeExt}`;
+        const destPath = path.resolve(itemCacheDir, finalName);
+        if (!destPath.startsWith(itemCacheDir + path.sep)) {
+          throw new Error('Invalid local cache destination.');
+        }
+        return destPath;
+      });
+      if (!res.fallback && res.path) break;
+    }
 
     if (!res.fallback && res.path) {
-      await shell.openPath(res.path);
-      return { localPath: res.path };
+      const finalName = path.basename(res.path);
+      const downloadsPath = saveCopyToDownloads(res.path, finalName);
+      const preview = buildPreviewPayload(res.path, res.contentType);
+      if (openExternally) {
+        await shell.openPath(downloadsPath || res.path);
+      }
+      return {
+        localPath: res.path,
+        downloadsPath,
+        fileName: finalName,
+        mimeType: preview.mimeType,
+        base64: preview.base64
+      };
     }
 
     const safeView = validateHttpsUrl(item.viewUrl);
@@ -487,7 +628,7 @@ function registerIpcHandlers() {
     if (BLOCKED_EXTENSIONS.has(ext)) {
       throw new Error(`Blocked file extension '.${ext}'.`);
     }
-    const safeName = fileName.replace(/[^a-zA-Z0-9._\-\u0600-\u06FF ]/g, '_').slice(0, 80) || 'material.pdf';
+    const safeName = sanitizeDownloadFileName(fileName, 'material.pdf').slice(0, 90);
     const cacheDir = getCacheDir();
     const targetPath = path.resolve(cacheDir, `course_${courseId}_${safeName}`);
     if (!targetPath.startsWith(cacheDir + path.sep)) {
@@ -496,11 +637,12 @@ function registerIpcHandlers() {
 
     const bytes = Buffer.from(base64Data, 'base64');
     fs.writeFileSync(targetPath, bytes);
-    const openError = await shell.openPath(targetPath);
+    const downloadsPath = saveCopyToDownloads(targetPath, safeName);
+    const openError = await shell.openPath(downloadsPath || targetPath);
     if (openError) {
       throw new Error(openError);
     }
-    return { localPath: targetPath };
+    return { localPath: targetPath, downloadsPath, fileName: safeName };
   });
 }
 

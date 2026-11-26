@@ -5,8 +5,10 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock,
   Globe,
   Headset,
+  Image as ImageIcon,
   LogOut,
   Moon,
   Palette,
@@ -20,8 +22,14 @@ import {
   SunMoon,
   Trash2,
   UserPlus,
-  Users
+  Users,
+  X
 } from 'lucide-react';
+import {
+  getFirebaseRuntimeConfig,
+  reinitializeFirebaseClients,
+  saveFirebaseOverrideConfig
+} from '../firebase/config';
 import {
   demoteAdminToStudent,
   inviteAccountByEmail,
@@ -30,6 +38,7 @@ import {
   revokeInvite,
   sendSupportMessage,
   setUserAccountDisabled,
+  setUserTimedBan,
   updateSystemSettingsAsSuperAdmin
 } from '../data/firestoreService';
 
@@ -51,6 +60,7 @@ export default function AccountConsoleView({
   roleInvites,
   supportMessages,
   auditLogs,
+  onClientsUpdated,
   onSignOut,
   onShowToast
 }) {
@@ -58,6 +68,9 @@ export default function AccountConsoleView({
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showComposeSupport, setShowComposeSupport] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
+  const [banTargetUser, setBanTargetUser] = useState(null);
+  const [zoomImageUrl, setZoomImageUrl] = useState(null);
+  const [showConnectionModal, setShowConnectionModal] = useState(false);
   const [userSearch, setUserSearch] = useState('');
 
   const [aiEnabled, setAiEnabled] = useState(Boolean(systemSettings?.aiEnabled ?? true));
@@ -230,6 +243,7 @@ export default function AccountConsoleView({
             currentUserId={currentUserId}
             messages={supportMessages}
             onReply={(msg) => setReplyingTo(msg)}
+            onZoomImage={(url) => setZoomImageUrl(url)}
           />
         )}
       </div>
@@ -302,6 +316,13 @@ export default function AccountConsoleView({
 
           {filteredUsers.map((u) => {
             const disabled = Boolean(u.accountDisabled);
+            const banUntil = Number(u.banUntilMillis || 0);
+            const isTimedBanned = banUntil > Date.now();
+            const canBanTarget =
+              u.userId !== currentUserId &&
+              u.role !== 'SUPER_ADMIN' &&
+              (userRole === 'SUPER_ADMIN' || u.role === 'STUDENT');
+
             const rLabel =
               u.role === 'SUPER_ADMIN'
                 ? strings.roleSuperAdmin
@@ -312,7 +333,11 @@ export default function AccountConsoleView({
               <div
                 key={u.userId}
                 className="m3-subsurface"
-                style={disabled ? { background: 'color-mix(in srgb, var(--error-container) 28%, transparent)' } : undefined}
+                style={
+                  disabled || isTimedBanned
+                    ? { background: 'color-mix(in srgb, var(--error-container) 28%, transparent)' }
+                    : undefined
+                }
               >
                 <div className="row-between">
                   <div>
@@ -320,42 +345,63 @@ export default function AccountConsoleView({
                     <div style={{ color: 'var(--primary)', fontSize: '0.82rem', fontWeight: 600 }}>
                       {rLabel} • AI {u.aiCallsToday || 0} • Sync {u.writesToday || 0}
                     </div>
+                    {isTimedBanned ? (
+                      <div style={{ color: 'var(--error)', fontSize: '0.78rem', fontWeight: 600 }}>
+                        {strings.bannedUntilLabel}: {new Date(banUntil).toLocaleString()}
+                        {u.banReason ? ` (${u.banReason})` : ''}
+                      </div>
+                    ) : null}
                   </div>
-                  <span className={`pill ${disabled ? 'pill-error' : 'pill-secondary'}`}>
-                    {disabled ? strings.accountStatusDisabled : strings.accountStatusActive}
+                  <span className={`pill ${disabled || isTimedBanned ? 'pill-error' : 'pill-secondary'}`}>
+                    {disabled || isTimedBanned ? strings.accountStatusDisabled : strings.accountStatusActive}
                   </span>
                 </div>
 
-                {userRole === 'SUPER_ADMIN' && u.userId !== currentUserId && u.role !== 'SUPER_ADMIN' ? (
+                {(canBanTarget || (userRole === 'SUPER_ADMIN' && u.userId !== currentUserId && u.role !== 'SUPER_ADMIN')) ? (
                   <div className="chip-row">
-                    {u.role === 'STUDENT' ? (
+                    {canBanTarget ? (
                       <button
                         type="button"
                         className="btn btn-outlined"
-                        onClick={() => promoteUserToAdmin(db, auth, u).catch((e) => onShowToast(e.message))}
+                        onClick={() => setBanTargetUser(u)}
                       >
-                        {strings.promoteToAdmin}
-                      </button>
-                    ) : u.role === 'ADMIN' ? (
-                      <button
-                        type="button"
-                        className="btn btn-outlined"
-                        onClick={() => demoteAdminToStudent(db, auth, u.userId).catch((e) => onShowToast(e.message))}
-                      >
-                        {strings.demoteToStudent}
+                        <Clock size={15} />
+                        <span>{isTimedBanned ? strings.unbanUserAction : strings.banUserAction}</span>
                       </button>
                     ) : null}
 
-                    <button
-                      type="button"
-                      className={`btn ${disabled ? 'btn-outlined' : 'btn-danger-outlined'}`}
-                      onClick={() =>
-                        setUserAccountDisabled(db, auth, u, !disabled).catch((e) => onShowToast(e.message))
-                      }
-                    >
-                      {disabled ? <CheckCircle2 size={15} /> : <Ban size={15} />}
-                      <span>{disabled ? strings.enableAccountAction : strings.disableAccountAction}</span>
-                    </button>
+                    {userRole === 'SUPER_ADMIN' && u.userId !== currentUserId && u.role !== 'SUPER_ADMIN' ? (
+                      <>
+                        {u.role === 'STUDENT' ? (
+                          <button
+                            type="button"
+                            className="btn btn-outlined"
+                            onClick={() => promoteUserToAdmin(db, auth, u).catch((e) => onShowToast(e.message))}
+                          >
+                            {strings.promoteToAdmin}
+                          </button>
+                        ) : u.role === 'ADMIN' ? (
+                          <button
+                            type="button"
+                            className="btn btn-outlined"
+                            onClick={() => demoteAdminToStudent(db, auth, u.userId).catch((e) => onShowToast(e.message))}
+                          >
+                            {strings.demoteToStudent}
+                          </button>
+                        ) : null}
+
+                        <button
+                          type="button"
+                          className={`btn ${disabled ? 'btn-outlined' : 'btn-danger-outlined'}`}
+                          onClick={() =>
+                            setUserAccountDisabled(db, auth, u, !disabled).catch((e) => onShowToast(e.message))
+                          }
+                        >
+                          {disabled ? <CheckCircle2 size={15} /> : <Ban size={15} />}
+                          <span>{disabled ? strings.enableAccountAction : strings.disableAccountAction}</span>
+                        </button>
+                      </>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -364,12 +410,22 @@ export default function AccountConsoleView({
         </div>
       ) : null}
 
-      {/* Super Admin Policy Controls */}
+      {/* Super Admin Policy & Connection Controls */}
       {userRole === 'SUPER_ADMIN' ? (
         <div className="m3-card">
-          <div className="row-gap">
-            <Settings size={20} style={{ color: 'var(--tertiary)' }} />
-            <h3 style={{ margin: 0 }}>{strings.governanceTitle}</h3>
+          <div className="row-between">
+            <div className="row-gap">
+              <Settings size={20} style={{ color: 'var(--tertiary)' }} />
+              <h3 style={{ margin: 0 }}>{strings.governanceTitle}</h3>
+            </div>
+            <button
+              type="button"
+              className="btn btn-outlined"
+              onClick={() => setShowConnectionModal(true)}
+            >
+              <Settings size={15} />
+              <span>{strings.firebaseSetupTitle}</span>
+            </button>
           </div>
 
           <label className="row-between" style={{ cursor: 'pointer' }}>
@@ -508,14 +564,32 @@ export default function AccountConsoleView({
         />
       ) : null}
 
+      {banTargetUser ? (
+        <TimedBanModal
+          strings={strings}
+          language={language}
+          user={banTargetUser}
+          onClose={() => setBanTargetUser(null)}
+          onConfirm={async (minutes, reason) => {
+            try {
+              await setUserTimedBan(db, auth, banTargetUser, minutes, reason);
+              setBanTargetUser(null);
+              onShowToast(minutes > 0 ? strings.banUserAction : strings.unbanUserAction);
+            } catch (err) {
+              onShowToast(err.message);
+            }
+          }}
+        />
+      ) : null}
+
       {showComposeSupport ? (
         <ComposeSupportModal
           strings={strings}
           title={userRole === 'ADMIN' ? strings.contactSuperAdminAction : strings.contactAdminAction}
           onClose={() => setShowComposeSupport(false)}
-          onSubmit={async ({ subject, body }) => {
+          onSubmit={async ({ subject, body, imageFile }) => {
             try {
-              await sendSupportMessage(db, auth, { userRole, subject, body });
+              await sendSupportMessage(db, auth, { userRole, subject, body, imageFile });
               setShowComposeSupport(false);
               onShowToast(strings.sendAction);
             } catch (err) {
@@ -530,9 +604,9 @@ export default function AccountConsoleView({
           strings={strings}
           message={replyingTo}
           onClose={() => setReplyingTo(null)}
-          onSubmit={async (replyText) => {
+          onSubmit={async ({ replyText, imageFile }) => {
             try {
-              await replyToSupportMessage(db, auth, { message: replyingTo, replyText });
+              await replyToSupportMessage(db, auth, { message: replyingTo, replyText, imageFile });
               setReplyingTo(null);
               onShowToast(strings.sendAction);
             } catch (err) {
@@ -541,17 +615,48 @@ export default function AccountConsoleView({
           }}
         />
       ) : null}
+
+      {showConnectionModal && userRole === 'SUPER_ADMIN' ? (
+        <SuperAdminConnectionModal
+          strings={strings}
+          language={language}
+          onClose={() => setShowConnectionModal(false)}
+          onSaved={async (nextClients) => {
+            onClientsUpdated?.(nextClients);
+            setShowConnectionModal(false);
+            onShowToast(language === 'ARABIC' ? 'تم حفظ إعدادات الربط' : 'Connection settings saved');
+          }}
+        />
+      ) : null}
+
+      {zoomImageUrl ? (
+        <div className="modal-backdrop" onClick={() => setZoomImageUrl(null)}>
+          <div className="modal-panel" style={{ maxWidth: '820px' }} onClick={(e) => e.stopPropagation()}>
+            <div className="row-between">
+              <span style={{ fontWeight: 700 }}>{strings.supportSectionTitle}</span>
+              <button type="button" className="icon-btn" onClick={() => setZoomImageUrl(null)}>
+                <X size={18} />
+              </button>
+            </div>
+            <img
+              src={zoomImageUrl}
+              alt="Support attachment"
+              style={{ width: '100%', maxHeight: '72vh', objectFit: 'contain', borderRadius: '10px' }}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function SupportInboxContent({ strings, userRole, currentUserId, messages, onReply }) {
+function SupportInboxContent({ strings, userRole, currentUserId, messages, onReply, onZoomImage }) {
   if (userRole === 'STUDENT') {
     return (
       <>
         <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{strings.mySentMessagesTitle}</div>
         {messages.map((m) => (
-          <SupportTicketItem key={m.id} strings={strings} msg={m} canReply={false} onReply={() => {}} />
+          <SupportTicketItem key={m.id} strings={strings} msg={m} canReply={false} onReply={() => {}} onZoomImage={onZoomImage} />
         ))}
       </>
     );
@@ -566,7 +671,7 @@ function SupportInboxContent({ strings, userRole, currentUserId, messages, onRep
           <>
             <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{strings.adminToSuperInboxTitle}</div>
             {adminToSuper.map((m) => (
-              <SupportTicketItem key={m.id} strings={strings} msg={m} canReply={false} onReply={() => {}} />
+              <SupportTicketItem key={m.id} strings={strings} msg={m} canReply={false} onReply={() => {}} onZoomImage={onZoomImage} />
             ))}
           </>
         ) : null}
@@ -574,7 +679,7 @@ function SupportInboxContent({ strings, userRole, currentUserId, messages, onRep
           <>
             <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{strings.studentInquiriesTitle}</div>
             {studentInquiries.map((m) => (
-              <SupportTicketItem key={m.id} strings={strings} msg={m} canReply onReply={() => onReply(m)} />
+              <SupportTicketItem key={m.id} strings={strings} msg={m} canReply onReply={() => onReply(m)} onZoomImage={onZoomImage} />
             ))}
           </>
         ) : null}
@@ -590,7 +695,7 @@ function SupportInboxContent({ strings, userRole, currentUserId, messages, onRep
         <>
           <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{strings.adminToSuperInboxTitle}</div>
           {escalations.map((m) => (
-            <SupportTicketItem key={m.id} strings={strings} msg={m} canReply onReply={() => onReply(m)} />
+            <SupportTicketItem key={m.id} strings={strings} msg={m} canReply onReply={() => onReply(m)} onZoomImage={onZoomImage} />
           ))}
         </>
       ) : null}
@@ -598,7 +703,7 @@ function SupportInboxContent({ strings, userRole, currentUserId, messages, onRep
         <>
           <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{strings.studentInquiriesTitle}</div>
           {studentMsgs.map((m) => (
-            <SupportTicketItem key={m.id} strings={strings} msg={m} canReply onReply={() => onReply(m)} />
+            <SupportTicketItem key={m.id} strings={strings} msg={m} canReply onReply={() => onReply(m)} onZoomImage={onZoomImage} />
           ))}
         </>
       ) : null}
@@ -606,8 +711,15 @@ function SupportInboxContent({ strings, userRole, currentUserId, messages, onRep
   );
 }
 
-function SupportTicketItem({ strings, msg, canReply, onReply }) {
+function SupportTicketItem({ strings, msg, canReply, onReply, onZoomImage }) {
   const isReplied = msg.status === 'REPLIED' && Boolean(msg.replyText);
+  const msgImgUrl = msg.attachmentBase64
+    ? `data:${msg.attachmentMimeType || 'image/jpeg'};base64,${msg.attachmentBase64}`
+    : null;
+  const replyImgUrl = msg.replyAttachmentBase64
+    ? `data:${msg.replyAttachmentMimeType || 'image/jpeg'};base64,${msg.replyAttachmentBase64}`
+    : null;
+
   return (
     <div className="m3-subsurface">
       <div className="row-between">
@@ -620,18 +732,49 @@ function SupportTicketItem({ strings, msg, canReply, onReply }) {
         {msg.senderName} ({msg.senderRole})
       </div>
       <div style={{ fontSize: '0.92rem' }}>{msg.body}</div>
+      {msgImgUrl ? (
+        <img
+          src={msgImgUrl}
+          alt={msg.attachmentName || 'Attachment'}
+          onClick={() => onZoomImage(msgImgUrl)}
+          style={{
+            maxWidth: '240px',
+            maxHeight: '160px',
+            borderRadius: '10px',
+            objectFit: 'cover',
+            cursor: 'pointer'
+          }}
+        />
+      ) : null}
       {isReplied ? (
         <div
           style={{
             background: 'color-mix(in srgb, var(--primary-container) 45%, transparent)',
             borderRadius: '10px',
-            padding: '10px'
+            padding: '10px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px'
           }}
         >
           <div style={{ fontWeight: 700, color: 'var(--primary)', fontSize: '0.8rem' }}>
             {msg.repliedByName || strings.roleAdmin}
           </div>
           <div style={{ fontSize: '0.88rem' }}>{msg.replyText}</div>
+          {replyImgUrl ? (
+            <img
+              src={replyImgUrl}
+              alt={msg.replyAttachmentName || 'Reply attachment'}
+              onClick={() => onZoomImage(replyImgUrl)}
+              style={{
+                maxWidth: '220px',
+                maxHeight: '150px',
+                borderRadius: '10px',
+                objectFit: 'cover',
+                cursor: 'pointer'
+              }}
+            />
+          ) : null}
         </div>
       ) : null}
       {canReply ? (
@@ -642,6 +785,147 @@ function SupportTicketItem({ strings, msg, canReply, onReply }) {
           </button>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function TimedBanModal({ strings, language, user, onClose, onConfirm }) {
+  const presets =
+    language === 'ENGLISH'
+      ? [
+          { mins: 60, label: '1 Hour' },
+          { mins: 360, label: '6 Hours' },
+          { mins: 1440, label: '24 Hours' },
+          { mins: 4320, label: '3 Days' },
+          { mins: 10080, label: '7 Days' },
+          { mins: 43200, label: '30 Days' },
+          { mins: 0, label: 'Unban Now' }
+        ]
+      : [
+          { mins: 60, label: 'ساعة واحدة' },
+          { mins: 360, label: '6 ساعات' },
+          { mins: 1440, label: '24 ساعة' },
+          { mins: 4320, label: '3 أيام' },
+          { mins: 10080, label: '7 أيام' },
+          { mins: 43200, label: '30 يوماً' },
+          { mins: 0, label: 'فك الحظر الآن' }
+        ];
+  const [durationMins, setDurationMins] = useState(
+    Number(user.banUntilMillis || 0) > Date.now() ? 0 : 1440
+  );
+  const [reason, setReason] = useState(user.banReason || '');
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <form
+        className="modal-panel"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault();
+          onConfirm(durationMins, reason);
+        }}
+      >
+        <h3 style={{ margin: 0 }}>
+          {strings.banModalTitle}: {user.displayName}
+        </h3>
+        <span className="field-label">{strings.banDurationLabel}</span>
+        <div className="chip-row" style={{ flexWrap: 'wrap' }}>
+          {presets.map((p) => (
+            <button
+              key={p.mins}
+              type="button"
+              className={`m3-chip ${durationMins === p.mins ? 'selected' : ''}`}
+              onClick={() => setDurationMins(p.mins)}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+        {durationMins > 0 ? (
+          <div className="field-group">
+            <label className="field-label">{strings.banReasonLabel}</label>
+            <input
+              className="m3-input"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder={language === 'ENGLISH' ? 'Optional ban reason...' : 'اكتب سبب الحظر (اختياري)...'}
+            />
+          </div>
+        ) : null}
+        <div className="row-between" style={{ justifyContent: 'flex-end' }}>
+          <button type="button" className="btn btn-text" onClick={onClose}>
+            {strings.cancelAction}
+          </button>
+          <button type="submit" className="btn btn-primary">
+            {durationMins > 0 ? strings.banUserAction : strings.unbanUserAction}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function SuperAdminConnectionModal({ strings, language, onClose, onSaved }) {
+  const initialCfg = getFirebaseRuntimeConfig();
+  const [apiKeyInput, setApiKeyInput] = useState(initialCfg.apiKey);
+  const [appIdInput, setAppIdInput] = useState(initialCfg.appId);
+  const [projectIdInput, setProjectIdInput] = useState(initialCfg.projectId);
+  const [dbIdInput, setDbIdInput] = useState(initialCfg.firestoreDatabaseId);
+  const [appCheckTokenInput, setAppCheckTokenInput] = useState(initialCfg.appCheckDebugToken || '');
+  const [webRecaptchaInput, setWebRecaptchaInput] = useState(initialCfg.webRecaptchaKey || '');
+
+  const handleSave = async (e) => {
+    e.preventDefault();
+    saveFirebaseOverrideConfig({
+      apiKey: apiKeyInput.trim(),
+      appId: appIdInput.trim(),
+      projectId: projectIdInput.trim() || 'gen-lang-client-0870704520',
+      firestoreDatabaseId:
+        dbIdInput.trim() || 'ai-studio-android-unicore-9b169dd7-0f78-40f7-9411-0587832d12de',
+      appCheckDebugToken: appCheckTokenInput.trim(),
+      webRecaptchaKey: webRecaptchaInput.trim()
+    });
+    const nextClients = await reinitializeFirebaseClients();
+    await onSaved(nextClients);
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <form className="modal-panel" onClick={(e) => e.stopPropagation()} onSubmit={handleSave}>
+        <h3 style={{ margin: 0 }}>{strings.firebaseSetupTitle}</h3>
+        <div className="field-group">
+          <label className="field-label">Firebase Web API Key</label>
+          <input className="m3-input" value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)} required />
+        </div>
+        <div className="field-group">
+          <label className="field-label">Firebase Web App ID (AI Tutor)</label>
+          <input className="m3-input" value={appIdInput} onChange={(e) => setAppIdInput(e.target.value)} />
+        </div>
+        <div className="field-group">
+          <label className="field-label">Project ID</label>
+          <input className="m3-input" value={projectIdInput} onChange={(e) => setProjectIdInput(e.target.value)} />
+        </div>
+        <div className="field-group">
+          <label className="field-label">Firestore Database ID</label>
+          <input className="m3-input" value={dbIdInput} onChange={(e) => setDbIdInput(e.target.value)} />
+        </div>
+        <div className="field-group">
+          <label className="field-label">App Check Debug Token ({language === 'ARABIC' ? 'اختياري' : 'Optional'})</label>
+          <input className="m3-input" value={appCheckTokenInput} onChange={(e) => setAppCheckTokenInput(e.target.value)} />
+        </div>
+        <div className="field-group">
+          <label className="field-label">Web reCAPTCHA v3 Site Key ({language === 'ARABIC' ? 'اختياري' : 'Optional'})</label>
+          <input className="m3-input" value={webRecaptchaInput} onChange={(e) => setWebRecaptchaInput(e.target.value)} />
+        </div>
+        <div className="row-between" style={{ justifyContent: 'flex-end' }}>
+          <button type="button" className="btn btn-text" onClick={onClose}>
+            {strings.cancelAction}
+          </button>
+          <button type="submit" className="btn btn-primary">
+            {strings.savePolicyButton}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
@@ -712,14 +996,30 @@ function InviteModal({ strings, isSuperAdmin, onClose, onSubmit }) {
 function ComposeSupportModal({ strings, title, onClose, onSubmit }) {
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
+  const [imageFile, setImageFile] = useState(null);
+  const [sending, setSending] = useState(false);
+
+  const pickImage = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg';
+    input.onchange = () => {
+      const f = input.files?.[0];
+      if (f) setImageFile(f);
+    };
+    input.click();
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form
         className="modal-panel"
         onClick={(e) => e.stopPropagation()}
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
-          onSubmit({ subject, body });
+          setSending(true);
+          await onSubmit({ subject, body, imageFile });
+          setSending(false);
         }}
       >
         <h3 style={{ margin: 0 }}>{title}</h3>
@@ -731,12 +1031,31 @@ function ComposeSupportModal({ strings, title, onClose, onSubmit }) {
           <label className="field-label">{strings.supportBodyLabel}</label>
           <textarea className="m3-textarea" rows={4} value={body} onChange={(e) => setBody(e.target.value)} required />
         </div>
+        <div className="row-gap" style={{ flexWrap: 'wrap' }}>
+          <button type="button" className="btn btn-outlined" onClick={pickImage}>
+            <ImageIcon size={15} />
+            <span>{strings.attachPhotoAction}</span>
+          </button>
+          {imageFile ? (
+            <div className="row-gap pill pill-secondary" style={{ padding: '6px 10px' }}>
+              <span>{imageFile.name}</span>
+              <button
+                type="button"
+                className="icon-btn"
+                style={{ width: '22px', height: '22px' }}
+                onClick={() => setImageFile(null)}
+              >
+                <X size={13} />
+              </button>
+            </div>
+          ) : null}
+        </div>
         <div className="row-between" style={{ justifyContent: 'flex-end' }}>
           <button type="button" className="btn btn-text" onClick={onClose}>
             {strings.cancelAction}
           </button>
-          <button type="submit" className="btn btn-primary" disabled={!subject.trim() || !body.trim()}>
-            {strings.sendAction}
+          <button type="submit" className="btn btn-primary" disabled={sending || !subject.trim() || !body.trim()}>
+            {sending ? <span className="spinner" /> : strings.sendAction}
           </button>
         </div>
       </form>
@@ -746,14 +1065,30 @@ function ComposeSupportModal({ strings, title, onClose, onSubmit }) {
 
 function ReplySupportModal({ strings, message, onClose, onSubmit }) {
   const [reply, setReply] = useState(message.replyText || '');
+  const [imageFile, setImageFile] = useState(null);
+  const [sending, setSending] = useState(false);
+
+  const pickImage = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg';
+    input.onchange = () => {
+      const f = input.files?.[0];
+      if (f) setImageFile(f);
+    };
+    input.click();
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form
         className="modal-panel"
         onClick={(e) => e.stopPropagation()}
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
-          onSubmit(reply);
+          setSending(true);
+          await onSubmit({ replyText: reply, imageFile });
+          setSending(false);
         }}
       >
         <h3 style={{ margin: 0 }}>
@@ -764,12 +1099,31 @@ function ReplySupportModal({ strings, message, onClose, onSubmit }) {
           <label className="field-label">{strings.replyHint}</label>
           <textarea className="m3-textarea" rows={4} value={reply} onChange={(e) => setReply(e.target.value)} required />
         </div>
+        <div className="row-gap" style={{ flexWrap: 'wrap' }}>
+          <button type="button" className="btn btn-outlined" onClick={pickImage}>
+            <ImageIcon size={15} />
+            <span>{strings.attachPhotoAction}</span>
+          </button>
+          {imageFile ? (
+            <div className="row-gap pill pill-secondary" style={{ padding: '6px 10px' }}>
+              <span>{imageFile.name}</span>
+              <button
+                type="button"
+                className="icon-btn"
+                style={{ width: '22px', height: '22px' }}
+                onClick={() => setImageFile(null)}
+              >
+                <X size={13} />
+              </button>
+            </div>
+          ) : null}
+        </div>
         <div className="row-between" style={{ justifyContent: 'flex-end' }}>
           <button type="button" className="btn btn-text" onClick={onClose}>
             {strings.cancelAction}
           </button>
-          <button type="submit" className="btn btn-primary" disabled={!reply.trim()}>
-            {strings.sendAction}
+          <button type="submit" className="btn btn-primary" disabled={sending || !reply.trim()}>
+            {sending ? <span className="spinner" /> : strings.sendAction}
           </button>
         </div>
       </form>

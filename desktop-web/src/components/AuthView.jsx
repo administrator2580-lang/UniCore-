@@ -4,7 +4,6 @@ import {
   LogIn,
   Moon,
   School,
-  Settings,
   Sun,
   SunMoon
 } from 'lucide-react';
@@ -34,6 +33,8 @@ export default function AuthView({
   const [appIdInput, setAppIdInput] = useState(initialCfg.appId);
   const [projectIdInput, setProjectIdInput] = useState(initialCfg.projectId);
   const [dbIdInput, setDbIdInput] = useState(initialCfg.firestoreDatabaseId);
+  const [appCheckTokenInput, setAppCheckTokenInput] = useState(initialCfg.appCheckDebugToken || '');
+  const [webRecaptchaInput, setWebRecaptchaInput] = useState(initialCfg.webRecaptchaKey || '');
 
   const isDesktop = Boolean(window.unicoreDesktop?.isElectron);
 
@@ -61,7 +62,9 @@ export default function AuthView({
       appId: appIdInput.trim(),
       projectId: projectIdInput.trim() || 'gen-lang-client-0870704520',
       firestoreDatabaseId:
-        dbIdInput.trim() || 'ai-studio-android-unicore-9b169dd7-0f78-40f7-9411-0587832d12de'
+        dbIdInput.trim() || 'ai-studio-android-unicore-9b169dd7-0f78-40f7-9411-0587832d12de',
+      appCheckDebugToken: appCheckTokenInput.trim(),
+      webRecaptchaKey: webRecaptchaInput.trim()
     });
     const nextClients = await reinitializeFirebaseClients();
     onClientsUpdated(nextClients);
@@ -86,15 +89,6 @@ export default function AuthView({
             <span className="pill pill-primary">
               {isDesktop ? strings.desktopModeBadge : strings.webModeBadge}
             </span>
-            <button
-              type="button"
-              className="icon-btn tonal"
-              onClick={() => setShowConfigModal(true)}
-              title={strings.firebaseSetupTitle}
-              aria-label={strings.firebaseSetupTitle}
-            >
-              <Settings size={18} />
-            </button>
             <button
               type="button"
               className="icon-btn tonal"
@@ -198,6 +192,24 @@ export default function AuthView({
                 className="m3-input"
                 value={dbIdInput}
                 onChange={(e) => setDbIdInput(e.target.value)}
+              />
+            </div>
+            <div className="field-group">
+              <label className="field-label">App Check Debug Token (اختياري)</label>
+              <input
+                className="m3-input"
+                value={appCheckTokenInput}
+                onChange={(e) => setAppCheckTokenInput(e.target.value)}
+                placeholder="UUID من Firebase App Check -> Manage debug tokens"
+              />
+            </div>
+            <div className="field-group">
+              <label className="field-label">Web reCAPTCHA v3 Site Key (اختياري)</label>
+              <input
+                className="m3-input"
+                value={webRecaptchaInput}
+                onChange={(e) => setWebRecaptchaInput(e.target.value)}
+                placeholder="6L..."
               />
             </div>
             <div className="row-between" style={{ justifyContent: 'flex-end' }}>

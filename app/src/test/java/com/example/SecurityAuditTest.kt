@@ -4,6 +4,7 @@ import com.example.data.model.AuditSeverity
 import com.example.data.model.MaterialType
 import com.example.data.model.UserRole
 import com.example.security.InputValidator
+import com.example.security.ProfanityFilter
 import com.example.security.RateLimitEngine
 import com.example.security.RateLimiter
 import com.example.security.SecureFileValidator
@@ -158,5 +159,16 @@ class SecurityAuditTest {
         assertEquals(UserRole.STUDENT, UserRole.fromRaw("UNKNOWN_ROLE"))
         assertEquals(MaterialType.NOTES, MaterialType.fromRaw("LEGACY_TYPE"))
         assertEquals(AuditSeverity.INFO, AuditSeverity.fromRaw(null))
+    }
+
+    @Test
+    fun `profanity filter blocks normalized arabic franco and english abuse while allowing academic study text`() {
+        assertTrue(ProfanityFilter.containsProfanity("يا حـمـار يا شرموطة"))
+        assertTrue(ProfanityFilter.containsProfanity("ya kosomak"))
+        assertTrue(ProfanityFilter.containsProfanity("what the fuck"))
+        assertTrue(InputValidator.validateBoundedText("شـرمـوطـه", "Chat", 2, 100) is InputValidator.ValidationResult.Invalid)
+
+        assertFalse(ProfanityFilter.containsProfanity("محاضرة الطاقة المتجددة والفيزياء الهندسية"))
+        assertFalse(ProfanityFilter.containsProfanity("Can you explain class assessment and classic mechanics?"))
     }
 }

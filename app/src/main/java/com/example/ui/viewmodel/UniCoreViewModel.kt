@@ -18,6 +18,7 @@ import com.example.data.model.NotificationCategory
 import com.example.data.model.Quiz
 import com.example.data.model.QuizAttempt
 import com.example.data.model.RoleInvite
+import com.example.data.model.StudyChatMessage
 import com.example.data.model.SupportChannel
 import com.example.data.model.SupportMessage
 import com.example.data.model.SystemSettings
@@ -30,10 +31,13 @@ import com.example.data.repository.AiTutorRepository
 import com.example.data.repository.GoogleDriveSyncRepository
 import com.example.data.repository.UniCoreGovernanceRepository
 import com.example.data.repository.UniCoreRepository
+import com.example.security.ImageAttachmentHelper
 import com.example.security.InputValidator
+import com.example.security.ProfanityFilter
 import com.example.security.RateLimiter
 import com.example.security.SecureFileValidator
 import com.example.security.ZeroCostQuotaManager
+import java.io.File
 import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -69,6 +73,12 @@ sealed interface AiUiState {
     data class Error(val message: String) : AiUiState
 }
 
+data class InAppFilePreview(
+    val file: File,
+    val title: String,
+    val mimeType: String
+)
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class UniCoreViewModel(
     private val repository: UniCoreRepository,
@@ -100,6 +110,12 @@ class UniCoreViewModel(
 
     private val _openingDriveFileId = MutableStateFlow<String?>(null)
     val openingDriveFileId: StateFlow<String?> = _openingDriveFileId.asStateFlow()
+
+    private val _inAppPreviewFile = MutableStateFlow<InAppFilePreview?>(null)
+    val inAppPreviewFile: StateFlow<InAppFilePreview?> = _inAppPreviewFile.asStateFlow()
+
+    private val _selectedChatRoomId = MutableStateFlow("general")
+    val selectedChatRoomId: StateFlow<String> = _selectedChatRoomId.asStateFlow()
 
     private var activeAiJob: Job? = null
 
@@ -160,7 +176,9 @@ class UniCoreViewModel(
 
     private val isActiveSessionFlow: Flow<Boolean> =
         combine(_sessionReady, userProfile, _userRole) { ready, profile, role ->
-            ready && (role == UserRole.SUPER_ADMIN || profile?.accountDisabled != true)
+            val now = System.currentTimeMillis()
+            val timedBanned = (profile?.banUntilMillis ?: 0L) > now
+            ready && (role == UserRole.SUPER_ADMIN || (profile?.accountDisabled != true && !timedBanned))
         }
 
     val coursesState: StateFlow<UiState<List<Course>>> =
@@ -268,6 +286,29 @@ class UniCoreViewModel(
                 else governance.observeAdmins().asUiState("admins")
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Success(emptyList()))
+
+    val chatMessagesState: StateFlow<UiState<List<StudyChatMessage>>> =
+        combine(isActiveSessionFlow, _selectedChatRoomId) { active, roomId -> active to roomId }
+            .flatMapLatest { (active, roomId) ->
+                if (!active) flowOf(UiState.Success(emptyList()))
+                else governance.observeChatMessages(roomId).asUiState("chat_$roomId")
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Success(emptyList()))
+
+    fun selectChatRoom(departmentId: String?, yearIndex: Int?) {
+        _selectedChatRoomId.value = governance.buildChatRoomId(departmentId, yearIndex)
+    }
+
+    fun dismissInAppPreview() {
+        _inAppPreviewFile.value = null
+    }
+
+    fun openPreviewWithExternalApp(context: Context, preview: InAppFilePreview) {
+        val openRes = driveSyncRepository.openLocalFileWithIntent(context, preview.file, preview.mimeType)
+        if (openRes.isFailure) {
+            _statusBanner.value = "Saved in Downloads/UniCore (${preview.file.name}). No external viewer found."
+        }
+    }
 
     fun clearBanner() {
         _statusBanner.value = null
@@ -441,9 +482,17 @@ class UniCoreViewModel(
                 val res = repository.downloadOrOpenCourseAttachment(context, course)
                 res.onSuccess { localFile ->
                     val mime = course.attachmentMimeType ?: "application/pdf"
-                    val openRes = driveSyncRepository.openLocalFileWithIntent(context, localFile, mime)
-                    if (openRes.isFailure) {
-                        _statusBanner.value = "Saved in app cache (${localFile.name}). Install a PDF/image viewer to open."
+                    withContext(Dispatchers.IO) {
+                        driveSyncRepository.exportFileToDownloadsFolder(context, localFile, mime)
+                    }
+                    if (mime == "application/pdf" || mime.startsWith("image/")) {
+                        _inAppPreviewFile.value = InAppFilePreview(localFile, localFile.name, mime)
+                        _statusBanner.value = "Saved: ${localFile.name} (Downloads/UniCore)"
+                    } else {
+                        val openRes = driveSyncRepository.openLocalFileWithIntent(context, localFile, mime)
+                        if (openRes.isFailure) {
+                            _statusBanner.value = "Saved in Downloads/UniCore (${localFile.name})."
+                        }
                     }
                 }.onFailure { err ->
                     _statusBanner.value = InputValidator.safeUserErrorMessage(err, err.message ?: "Could not open file.")
@@ -533,9 +582,24 @@ class UniCoreViewModel(
                 res.onSuccess { outcome ->
                     when (outcome) {
                         is GoogleDriveSyncRepository.DriveOpenOutcome.LocalFileReady -> {
-                            val openRes = driveSyncRepository.openLocalFileWithIntent(context, outcome.file, outcome.mimeType)
-                            if (openRes.isFailure) {
-                                openExternalHttpsUrl(context, item.viewUrl)
+                            _statusBanner.value = if (outcome.savedToDownloads) {
+                                "Downloaded: ${outcome.file.name} (Downloads/UniCore)"
+                            } else {
+                                "Downloaded: ${outcome.file.name}"
+                            }
+                            if (outcome.mimeType == "application/pdf" || outcome.mimeType.startsWith("image/")) {
+                                _inAppPreviewFile.value = InAppFilePreview(
+                                    file = outcome.file,
+                                    title = outcome.file.name,
+                                    mimeType = outcome.mimeType
+                                )
+                            } else {
+                                val openRes = driveSyncRepository.openLocalFileWithIntent(
+                                    context, outcome.file, outcome.mimeType
+                                )
+                                if (openRes.isFailure) {
+                                    _statusBanner.value = "Saved '${outcome.file.name}' in Downloads/UniCore."
+                                }
                             }
                         }
                         is GoogleDriveSyncRepository.DriveOpenOutcome.FallbackToBrowser -> {
@@ -560,9 +624,13 @@ class UniCoreViewModel(
     }
 
     fun createQuiz(
+        context: Context,
         courseId: String,
         title: String,
         durationMinutes: Int,
+        startAtMillis: Long,
+        endAtMillis: Long,
+        quizImageUri: Uri?,
         questionPrompts: List<String>,
         optionBlocks: List<String>,
         correctIndices: List<Int>
@@ -579,10 +647,31 @@ class UniCoreViewModel(
                 return@launch
             }
             if (!checkWriteQuota()) return@launch
+
+            val compressedImage = if (quizImageUri != null) {
+                val res = withContext(Dispatchers.IO) {
+                    ImageAttachmentHelper.compressUriToBase64(
+                        context = context,
+                        uri = quizImageUri,
+                        maxBase64Chars = 1_500_000,
+                        maxDimensionPx = 1400
+                    )
+                }
+                res.getOrElse { err ->
+                    _statusBanner.value = err.message ?: "Could not prepare quiz image."
+                    return@launch
+                }
+            } else {
+                null
+            }
+
             val result = repository.createQuizWithAnswerKey(
                 courseId = courseId,
                 title = title,
                 durationMinutes = durationMinutes,
+                startAtMillis = startAtMillis,
+                endAtMillis = endAtMillis,
+                quizImage = compressedImage,
                 questionPrompts = questionPrompts,
                 optionBlocks = optionBlocks,
                 correctOptionIndices = correctIndices,
@@ -593,6 +682,10 @@ class UniCoreViewModel(
                 onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Failed to create quiz.") }
             )
         }
+    }
+
+    suspend fun fetchQuizImageBytes(quiz: Quiz): ByteArray? {
+        return repository.loadQuizImageBytes(quiz).getOrNull()
     }
 
     fun deleteQuiz(quizId: String) {
@@ -637,6 +730,35 @@ class UniCoreViewModel(
                         "Duplicate submission or permission restriction blocked."
                     )
                 }
+            )
+        }
+    }
+
+    fun cancelQuizForViolation(quiz: Quiz, selectedIndices: List<Int>, reason: String) {
+        viewModelScope.launch {
+            val result = repository.cancelQuizForViolation(
+                quizId = quiz.id,
+                quizTitle = quiz.title,
+                selectedIndices = selectedIndices,
+                reason = reason,
+                governance = governance
+            )
+            result.onFailure { err ->
+                Log.w(TAG, "Could not persist violation cancellation", err)
+            }
+        }
+    }
+
+    fun resetCancelledAttempt(attempt: QuizAttempt) {
+        viewModelScope.launch {
+            if (_userRole.value != UserRole.SUPER_ADMIN) {
+                _statusBanner.value = "Only Super Admin can unlock cancelled quiz attempts."
+                return@launch
+            }
+            val result = repository.resetCancelledAttemptAsSuperAdmin(attempt, governance)
+            _statusBanner.value = result.fold(
+                onSuccess = { "Cancelled attempt unlocked." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not unlock attempt.") }
             )
         }
     }
@@ -688,6 +810,16 @@ class UniCoreViewModel(
                     )
                 }
             }
+        }
+    }
+
+    fun deleteVerifiedFile(context: Context, record: VerifiedFileRecord) {
+        viewModelScope.launch {
+            val res = repository.deleteVerifiedFile(context, record)
+            _statusBanner.value = res.fold(
+                onSuccess = { "Deleted (${record.originalName})." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not delete file.") }
+            )
         }
     }
 
@@ -760,7 +892,7 @@ class UniCoreViewModel(
         }
     }
 
-    fun sendSupportMessage(subject: String, body: String) {
+    fun sendSupportMessage(context: Context, subject: String, body: String, imageUri: Uri?) {
         viewModelScope.launch {
             val role = _userRole.value
             val channel = when (role) {
@@ -772,11 +904,24 @@ class UniCoreViewModel(
                 }
             }
             if (!checkWriteQuota()) return@launch
+
+            val compressed = if (imageUri != null) {
+                withContext(Dispatchers.IO) {
+                    ImageAttachmentHelper.compressUriToBase64(context, imageUri, maxBase64Chars = 640_000)
+                }.getOrElse { err ->
+                    _statusBanner.value = err.message ?: "Invalid image attachment."
+                    return@launch
+                }
+            } else {
+                null
+            }
+
             val res = governance.sendSupportMessage(
                 channel = channel,
                 senderRole = role,
                 rawSubject = subject,
-                rawBody = body
+                rawBody = body,
+                attachment = compressed
             )
             _statusBanner.value = res.fold(
                 onSuccess = { "Message sent." },
@@ -785,7 +930,7 @@ class UniCoreViewModel(
         }
     }
 
-    fun replyToSupportMessage(message: SupportMessage, replyText: String) {
+    fun replyToSupportMessage(context: Context, message: SupportMessage, replyText: String, imageUri: Uri?) {
         viewModelScope.launch {
             val role = _userRole.value
             val channel = SupportChannel.fromRaw(message.channel)
@@ -801,11 +946,76 @@ class UniCoreViewModel(
                 _statusBanner.value = "Access denied."
                 return@launch
             }
-            val res = governance.replyToSupportMessage(message, replyText)
+
+            val compressed = if (imageUri != null) {
+                withContext(Dispatchers.IO) {
+                    ImageAttachmentHelper.compressUriToBase64(context, imageUri, maxBase64Chars = 640_000)
+                }.getOrElse { err ->
+                    _statusBanner.value = err.message ?: "Invalid image attachment."
+                    return@launch
+                }
+            } else {
+                null
+            }
+
+            val res = governance.replyToSupportMessage(message, replyText, compressed)
             _statusBanner.value = res.fold(
                 onSuccess = { "Reply sent." },
                 onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Failed to send reply.") }
             )
+        }
+    }
+
+    fun sendChatMessage(
+        context: Context,
+        roomId: String,
+        departmentName: String?,
+        academicYear: String?,
+        rawText: String,
+        imageUri: Uri?
+    ) {
+        viewModelScope.launch {
+            if (!checkWriteQuota()) return@launch
+            if (ProfanityFilter.containsProfanity(rawText)) {
+                governance.logAuditEvent(
+                    "PROFANITY_BLOCKED",
+                    AuditSeverity.WARN,
+                    "chat_rooms/$roomId",
+                    "Blocked abusive message in study chat."
+                )
+                _statusBanner.value = "تم حظر الإرسال لاحتواء النص على ألفاظ غير لائقة."
+                return@launch
+            }
+            val compressed = if (imageUri != null) {
+                withContext(Dispatchers.IO) {
+                    ImageAttachmentHelper.compressUriToBase64(context, imageUri, maxBase64Chars = 640_000)
+                }.getOrElse { err ->
+                    _statusBanner.value = err.message ?: "Invalid image attachment."
+                    return@launch
+                }
+            } else {
+                null
+            }
+            val res = governance.sendChatMessage(
+                roomId = roomId,
+                departmentName = departmentName,
+                academicYear = academicYear,
+                senderRole = _userRole.value,
+                rawText = rawText,
+                attachment = compressed
+            )
+            res.onFailure { err ->
+                _statusBanner.value = InputValidator.safeUserErrorMessage(err, err.message ?: "Could not send chat message.")
+            }
+        }
+    }
+
+    fun deleteChatMessage(roomId: String, messageId: String) {
+        viewModelScope.launch {
+            val res = governance.deleteChatMessage(roomId, messageId)
+            res.onFailure { err ->
+                _statusBanner.value = InputValidator.safeUserErrorMessage(err, "Could not delete chat message.")
+            }
         }
     }
 
@@ -862,6 +1072,33 @@ class UniCoreViewModel(
                     if (disabled) "${targetUser.displayName} disabled." else "${targetUser.displayName} re-enabled."
                 },
                 onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not update account status.") }
+            )
+        }
+    }
+
+    fun setUserTimedBan(targetUser: UserProfile, durationMinutes: Long, reason: String) {
+        viewModelScope.launch {
+            val actorRole = _userRole.value
+            val targetRole = UserRole.fromRaw(targetUser.role)
+            val allowed = (actorRole == UserRole.SUPER_ADMIN && targetUser.userId != currentUserId && targetRole != UserRole.SUPER_ADMIN) ||
+                (actorRole == UserRole.ADMIN && targetRole == UserRole.STUDENT && targetUser.userId != currentUserId)
+            if (!allowed) {
+                governance.logAuditEvent(
+                    "UNAUTHORIZED_ADMIN_ATTEMPT",
+                    AuditSeverity.HIGH,
+                    "users/${targetUser.userId}",
+                    "Unauthorized timed ban attempt."
+                )
+                _statusBanner.value = "Insufficient permission to ban this account."
+                return@launch
+            }
+            val res = governance.setUserTimedBan(targetUser, durationMinutes, reason)
+            _statusBanner.value = res.fold(
+                onSuccess = {
+                    if (durationMinutes > 0L) "${targetUser.displayName} temporarily banned."
+                    else "Ban lifted for ${targetUser.displayName}."
+                },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not update ban.") }
             )
         }
     }

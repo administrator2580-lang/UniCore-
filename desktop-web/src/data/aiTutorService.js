@@ -1,7 +1,8 @@
 import { getAI, getGenerativeModel, GoogleAIBackend } from 'firebase/ai';
+import { formatAiReadableText } from '../security/validators';
 
 const SYSTEM_INSTRUCTION =
-  'You are UniCore Academic Tutor. Give clear, concise, practical study answers in the user language (Arabic if prompted in Arabic or requested). Keep answers structured and well-formatted.';
+  'You are UniCore Academic Tutor. Give clear, concise, practical study answers in the user language (Arabic if prompted in Arabic or requested). CRITICAL FORMATTING RULE: Never output raw LaTeX, TeX dollar signs ($ or $$), backslashes (such as \\Omega, \\frac, \\text, \\times), or raw Markdown clutter (### or **). Always write math expressions using clear Unicode symbols (Ω, ×, ÷, =, √, ², ³, °) and simple bullet points (•) so students can read equations effortlessly.';
 
 export async function askAiTutorStream({
   app,
@@ -14,16 +15,16 @@ export async function askAiTutorStream({
   if (!config?.appId && !app?.options?.appId) {
     throw new Error(
       language === 'ARABIC'
-        ? 'يرجى إضافة App ID في إعدادات الربط (أيقونة الترس في شاشة الدخول) أو متغير VITE_FIREBASE_APP_ID لتشغيل المساعد الذكي.'
-        : 'Please set a Firebase App ID in Connection Settings or VITE_FIREBASE_APP_ID to use AI Tutor.'
+        ? 'يرجى التواصل مع السوبر أدمن لضبط App ID أو ضبط متغير VITE_FIREBASE_APP_ID لتشغيل المساعد الذكي.'
+        : 'Please ask a Super Admin to configure App ID or set VITE_FIREBASE_APP_ID to use AI Tutor.'
     );
   }
 
   const ai = getAI(app, { backend: new GoogleAIBackend() });
   const localizedPrompt =
     language === 'ARABIC'
-      ? `أجب باللغة العربية الواضحة وبأسلوب تعليمي مختصر ومنظم:\n${prompt}`
-      : prompt;
+      ? `أجب باللغة العربية الواضحة وبأسلوب تعليمي مختصر ومنظم بدون استخدام رموز LaTeX أو علامات $ أو *** أو ### (استخدم الرموز المباشرة مثل Ω و × و = فقط):\n${prompt}`
+      : `Answer clearly without raw LaTeX ($ or $$) or Markdown hashes (### or **). Use clean Unicode symbols (Ω, ×, ÷, √, ², =):\n${prompt}`;
 
   const modelCandidates = ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-2.5-flash'];
   let lastError = null;
@@ -51,24 +52,32 @@ export async function askAiTutorStream({
         const piece = typeof chunk.text === 'function' ? chunk.text() : '';
         if (piece) {
           fullText += piece;
-          onPartial(fullText);
+          onPartial(formatAiReadableText(fullText));
         }
       }
 
       if (fullText.trim()) {
-        return fullText;
+        return formatAiReadableText(fullText);
       }
 
       const unary = await model.generateContent(localizedPrompt);
       const unaryText = unary?.response?.text?.() || '';
       if (unaryText.trim()) {
-        onPartial(unaryText);
-        return unaryText;
+        const cleaned = formatAiReadableText(unaryText);
+        onPartial(cleaned);
+        return cleaned;
       }
     } catch (err) {
       if (err?.name === 'AbortError') throw err;
       const msg = String(err?.message || '').toLowerCase();
-      if (msg.includes('403') || msg.includes('app check') || msg.includes('quota') || msg.includes('429')) {
+      if (msg.includes('app check') || msg.includes('401')) {
+        throw new Error(
+          language === 'ARABIC'
+            ? 'خدمة App Check مفعّلة على Firebase AI Logic (خطأ 401). للحل: افتح Firebase Console ← App Check ← تبويب APIs ← اختر Firebase AI Logic واضغط Unenforce، أو أضف Debug Token / reCAPTCHA Key من إعدادات السوبر أدمن.'
+            : 'Firebase AI Logic App Check rejected this request (401). Fix: open Firebase Console -> App Check -> APIs -> Firebase AI Logic and click Unenforce, or configure an App Check Debug Token / reCAPTCHA key in Super Admin settings.'
+        );
+      }
+      if (msg.includes('403') || msg.includes('quota') || msg.includes('429')) {
         throw err;
       }
       lastError = err;

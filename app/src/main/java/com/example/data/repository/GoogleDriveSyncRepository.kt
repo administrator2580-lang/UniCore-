@@ -1,35 +1,46 @@
 package com.example.data.repository
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import com.example.data.model.DriveFolderLink
 import com.example.data.model.DriveSyncedFile
 import com.example.security.InputValidator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 /**
- * Zero-cost Google Drive shared folder sync & file downloader using embeddedfolderview HTML parsing
- * and direct HTTPS uc?export=download streaming into app-private cache shared via FileProvider.
+ * Zero-cost Google Drive shared folder sync & direct in-app file downloader.
+ * - Uses drive.usercontent.google.com/download + HTML confirmation form extraction so files
+ *   download locally instead of bouncing straight to browser links.
+ * - Saves downloaded files with their real names into Downloads/UniCore (via MediaStore on API 29+)
+ *   as well as app-private cache for instant in-app preview.
  */
 class GoogleDriveSyncRepository(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(14, TimeUnit.SECONDS)
+        .readTimeout(28, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 ) {
     companion object {
-        private const val MAX_DRIVE_DOWNLOAD_BYTES = 15L * 1024L * 1024L // 15 MB safety cap
+        private const val MAX_DRIVE_DOWNLOAD_BYTES = 25L * 1024L * 1024L // 25 MB safety cap
         private val BLOCKED_FILE_EXTENSIONS = setOf(
             "exe", "apk", "dex", "jar", "so", "sh", "bat", "cmd", "js", "vbs", "ps1", "msi", "elf"
         )
+        private const val BROWSER_UA =
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36"
     }
 
     suspend fun syncDriveFolders(folders: List<DriveFolderLink>): Result<List<DriveSyncedFile>> =
@@ -58,13 +69,15 @@ class GoogleDriveSyncRepository(
         val url = "https://drive.google.com/embeddedfolderview?id=${folder.folderId}#list"
         val request = Request.Builder()
             .url(url)
-            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36")
+            .header("User-Agent", BROWSER_UA)
             .get()
             .build()
 
         val html = httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                throw IllegalStateException("Google Drive folder '${folder.title}' returned HTTP ${response.code}. Ensure sharing is set to 'Anyone with the link'.")
+                throw IllegalStateException(
+                    "Google Drive folder '${folder.title}' returned HTTP ${response.code}. Ensure sharing is set to 'Anyone with the link'."
+                )
             }
             response.body?.string().orEmpty()
         }
@@ -77,8 +90,6 @@ class GoogleDriveSyncRepository(
         val results = mutableListOf<DriveSyncedFile>()
         val seenIds = mutableSetOf<String>()
 
-        // Match opening containers with id="entry-<ID>" regardless of attribute order,
-        // then slice until the next entry container so nested flip-entry-* divs never truncate blocks.
         val entryStartRegex = Regex(
             """<div\b[^>]*\bid=["']entry-([a-zA-Z0-9_-]{10,128})["'][^>]*>""",
             RegexOption.IGNORE_CASE
@@ -108,14 +119,14 @@ class GoogleDriveSyncRepository(
                 else -> "https://drive.google.com/file/d/$itemId/view"
             }
 
-            val downloadUrl = if (href.contains("docs.google.com/document/d/", ignoreCase = true)) {
-                "https://docs.google.com/document/d/$itemId/export?format=pdf"
-            } else if (href.contains("docs.google.com/presentation/d/", ignoreCase = true)) {
-                "https://docs.google.com/presentation/d/$itemId/export/pdf"
-            } else if (href.contains("docs.google.com/spreadsheets/d/", ignoreCase = true)) {
-                "https://docs.google.com/spreadsheets/d/$itemId/export?format=pdf"
-            } else {
-                "https://drive.google.com/uc?export=download&id=$itemId"
+            val downloadUrl = when {
+                href.contains("docs.google.com/document/d/", ignoreCase = true) ->
+                    "https://docs.google.com/document/d/$itemId/export?format=pdf"
+                href.contains("docs.google.com/presentation/d/", ignoreCase = true) ->
+                    "https://docs.google.com/presentation/d/$itemId/export/pdf"
+                href.contains("docs.google.com/spreadsheets/d/", ignoreCase = true) ->
+                    "https://docs.google.com/spreadsheets/d/$itemId/export?format=pdf"
+                else -> "https://drive.usercontent.google.com/download?id=$itemId&export=download&confirm=t"
             }
 
             val mimeHint = inferMimeHint(cleanTitle, isSubFolder, href)
@@ -133,7 +144,6 @@ class GoogleDriveSyncRepository(
             )
         }
 
-        // Secondary fallback regex if Drive uses anchor-only layout without entry- IDs
         if (results.isEmpty()) {
             val anchorRegex = Regex(
                 """<a\b([^>]*href=["'](https://(?:drive|docs)\.google\.com/(?:file/d|document/d|presentation/d|spreadsheets/d|drive/folders)/([a-zA-Z0-9_-]{10,128})[^"']*)["'][^>]*)>(.*?)</a>""",
@@ -160,7 +170,7 @@ class GoogleDriveSyncRepository(
                             isSubFolder = isSub,
                             mimeHint = inferMimeHint(title, isSub, href),
                             viewUrl = href,
-                            downloadUrl = "https://drive.google.com/uc?export=download&id=$itemId"
+                            downloadUrl = "https://drive.usercontent.google.com/download?id=$itemId&export=download&confirm=t"
                         )
                     )
                 }
@@ -171,7 +181,12 @@ class GoogleDriveSyncRepository(
     }
 
     sealed interface DriveOpenOutcome {
-        data class LocalFileReady(val file: File, val mimeType: String) : DriveOpenOutcome
+        data class LocalFileReady(
+            val file: File,
+            val mimeType: String,
+            val savedToDownloads: Boolean
+        ) : DriveOpenOutcome
+
         data class FallbackToBrowser(val url: String) : DriveOpenOutcome
     }
 
@@ -185,11 +200,12 @@ class GoogleDriveSyncRepository(
 
             val initialExt = item.name.substringAfterLast('.', "").lowercase()
             if (initialExt in BLOCKED_FILE_EXTENSIONS) {
-                return@withContext Result.failure(SecurityException("Blocked executable extension '.$initialExt' from Google Drive."))
+                return@withContext Result.failure(
+                    SecurityException("Blocked executable extension '.$initialExt' from Google Drive.")
+                )
             }
 
             val cacheRoot = File(context.filesDir, "course_cache").apply { mkdirs() }
-            // Clean up any legacy prefixed cache entries (which included gdrive_<id>_ or old "Drive Item")
             cacheRoot.listFiles()?.filter { it.isFile && it.name.startsWith("gdrive_${safeFileId}_") }
                 ?.forEach { runCatching { it.delete() } }
 
@@ -207,106 +223,226 @@ class GoogleDriveSyncRepository(
             }
             if (cachedValid != null) {
                 val cachedMime = inferMimeFromExtension(cachedValid.extension, item.mimeHint)
-                return@withContext Result.success(DriveOpenOutcome.LocalFileReady(cachedValid, cachedMime))
+                val exported = exportFileToDownloadsFolder(context, cachedValid, cachedMime)
+                return@withContext Result.success(
+                    DriveOpenOutcome.LocalFileReady(cachedValid, cachedMime, exported)
+                )
             }
 
-            try {
-                val request = Request.Builder()
-                    .url(item.downloadUrl)
-                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36")
-                    .get()
-                    .build()
+            val candidateUrls = listOf(
+                item.downloadUrl,
+                "https://drive.usercontent.google.com/download?id=$safeFileId&export=download&confirm=t",
+                "https://drive.google.com/uc?export=download&id=$safeFileId&confirm=t"
+            ).distinct()
 
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        return@withContext Result.success(DriveOpenOutcome.FallbackToBrowser(item.viewUrl))
-                    }
-                    val body = response.body ?: return@withContext Result.success(
-                        DriveOpenOutcome.FallbackToBrowser(item.viewUrl)
-                    )
-                    val contentType = response.header("Content-Type")?.substringBefore(';')?.trim()?.lowercase().orEmpty()
-                    if (contentType.startsWith("text/html")) {
-                        // Drive returned confirmation/login HTML page (e.g., large file warning or private link)
-                        return@withContext Result.success(DriveOpenOutcome.FallbackToBrowser(item.viewUrl))
-                    }
+            for (candidateUrl in candidateUrls) {
+                val result = tryDownloadUrl(context, itemCacheDir, item, safeFileId, candidateUrl, allowHtmlFollowUp = true)
+                if (result != null) {
+                    return@withContext result
+                }
+            }
 
-                    val headerFileName = extractFileNameFromContentDisposition(response.header("Content-Disposition"))
-                    val chosenRawName = when {
-                        !headerFileName.isNullOrBlank() &&
-                            !headerFileName.equals("download", ignoreCase = true) &&
-                            !headerFileName.startsWith("Drive Item", ignoreCase = true) -> headerFileName
-                        else -> item.name
-                    }
+            Result.success(DriveOpenOutcome.FallbackToBrowser(item.viewUrl))
+        }
 
-                    val sanitizedBaseName = sanitizeDownloadFileName(
-                        chosenRawName,
-                        fallback = "drive_file_${safeFileId.take(8)}"
-                    )
-                    val detectedExt = sanitizedBaseName.substringAfterLast('.', "").lowercase()
-                    if (detectedExt in BLOCKED_FILE_EXTENSIONS) {
-                        return@withContext Result.failure(
-                            SecurityException("Blocked executable extension '.$detectedExt' from Google Drive.")
+    private fun tryDownloadUrl(
+        context: Context,
+        itemCacheDir: File,
+        item: DriveSyncedFile,
+        safeFileId: String,
+        targetUrl: String,
+        allowHtmlFollowUp: Boolean
+    ): Result<DriveOpenOutcome>? {
+        return try {
+            val request = Request.Builder()
+                .url(targetUrl)
+                .header("User-Agent", BROWSER_UA)
+                .get()
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val body = response.body ?: return null
+                val contentType = response.header("Content-Type")?.substringBefore(';')?.trim()?.lowercase().orEmpty()
+
+                if (contentType.startsWith("text/html")) {
+                    if (!allowHtmlFollowUp) return null
+                    val html = body.string()
+                    val confirmUrl = extractConfirmDownloadUrl(html, targetUrl)
+                    if (confirmUrl != null && isAllowedGoogleDownloadUrl(confirmUrl)) {
+                        return tryDownloadUrl(
+                            context,
+                            itemCacheDir,
+                            item,
+                            safeFileId,
+                            confirmUrl,
+                            allowHtmlFollowUp = false
                         )
                     }
+                    return null
+                }
 
-                    val resolvedMime = when {
-                        contentType.isNotBlank() && contentType != "application/octet-stream" -> contentType
-                        else -> inferMimeFromExtension(detectedExt, item.mimeHint)
-                    }
-                    val resolvedExt = when {
-                        sanitizedBaseName.contains('.') && detectedExt.isNotBlank() && detectedExt.length <= 8 -> detectedExt
-                        resolvedMime == "application/pdf" -> "pdf"
-                        resolvedMime == "image/png" -> "png"
-                        resolvedMime == "image/jpeg" -> "jpg"
-                        resolvedMime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> "docx"
-                        resolvedMime == "application/msword" -> "doc"
-                        resolvedMime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> "pptx"
-                        resolvedMime == "application/vnd.ms-powerpoint" -> "ppt"
-                        resolvedMime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" -> "xlsx"
-                        else -> "pdf"
-                    }
-                    val finalFileName = if (sanitizedBaseName.contains('.') && detectedExt.length in 1..8) {
-                        sanitizedBaseName
-                    } else {
-                        "$sanitizedBaseName.$resolvedExt"
-                    }
+                val headerFileName = extractFileNameFromContentDisposition(response.header("Content-Disposition"))
+                val chosenRawName = when {
+                    !headerFileName.isNullOrBlank() &&
+                        !headerFileName.equals("download", ignoreCase = true) &&
+                        !headerFileName.startsWith("Drive Item", ignoreCase = true) -> headerFileName
+                    else -> item.name
+                }
 
-                    val targetFile = File(itemCacheDir, finalFileName)
-                    if (!targetFile.canonicalPath.startsWith(itemCacheDir.canonicalPath + File.separator)) {
-                        return@withContext Result.failure(SecurityException("Invalid cache destination path."))
-                    }
+                val sanitizedBaseName = sanitizeDownloadFileName(
+                    chosenRawName,
+                    fallback = "drive_file_${safeFileId.take(8)}"
+                )
+                val detectedExt = sanitizedBaseName.substringAfterLast('.', "").lowercase()
+                if (detectedExt in BLOCKED_FILE_EXTENSIONS) {
+                    return Result.failure(
+                        SecurityException("Blocked executable extension '.$detectedExt' from Google Drive.")
+                    )
+                }
 
-                    val tmpFile = File(itemCacheDir, "$finalFileName.tmp")
-                    var totalBytes = 0L
-                    body.byteStream().use { input ->
-                        FileOutputStream(tmpFile).use { output ->
-                            val buffer = ByteArray(16 * 1024)
-                            while (true) {
-                                val read = input.read(buffer)
-                                if (read == -1) break
-                                totalBytes += read
-                                if (totalBytes > MAX_DRIVE_DOWNLOAD_BYTES) {
-                                    tmpFile.delete()
-                                    return@withContext Result.success(DriveOpenOutcome.FallbackToBrowser(item.viewUrl))
-                                }
-                                output.write(buffer, 0, read)
+                val resolvedMime = when {
+                    contentType.isNotBlank() && contentType != "application/octet-stream" -> contentType
+                    else -> inferMimeFromExtension(detectedExt, item.mimeHint)
+                }
+                val resolvedExt = when {
+                    sanitizedBaseName.contains('.') && detectedExt.isNotBlank() && detectedExt.length <= 8 -> detectedExt
+                    resolvedMime == "application/pdf" -> "pdf"
+                    resolvedMime == "image/png" -> "png"
+                    resolvedMime == "image/jpeg" -> "jpg"
+                    resolvedMime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> "docx"
+                    resolvedMime == "application/msword" -> "doc"
+                    resolvedMime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> "pptx"
+                    resolvedMime == "application/vnd.ms-powerpoint" -> "ppt"
+                    resolvedMime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" -> "xlsx"
+                    else -> "pdf"
+                }
+                val finalFileName = if (sanitizedBaseName.contains('.') && detectedExt.length in 1..8) {
+                    sanitizedBaseName
+                } else {
+                    "$sanitizedBaseName.$resolvedExt"
+                }
+
+                val targetFile = File(itemCacheDir, finalFileName)
+                if (!targetFile.canonicalPath.startsWith(itemCacheDir.canonicalPath + File.separator)) {
+                    return Result.failure(SecurityException("Invalid cache destination path."))
+                }
+
+                val tmpFile = File(itemCacheDir, "$finalFileName.tmp")
+                var totalBytes = 0L
+                body.byteStream().use { input ->
+                    FileOutputStream(tmpFile).use { output ->
+                        val buffer = ByteArray(16 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read == -1) break
+                            totalBytes += read
+                            if (totalBytes > MAX_DRIVE_DOWNLOAD_BYTES) {
+                                tmpFile.delete()
+                                return null
                             }
+                            output.write(buffer, 0, read)
                         }
                     }
-
-                    if (totalBytes <= 0L) {
-                        tmpFile.delete()
-                        return@withContext Result.success(DriveOpenOutcome.FallbackToBrowser(item.viewUrl))
-                    }
-
-                    if (targetFile.exists()) targetFile.delete()
-                    tmpFile.renameTo(targetFile)
-                    Result.success(DriveOpenOutcome.LocalFileReady(targetFile, resolvedMime))
                 }
-            } catch (_: Exception) {
-                Result.success(DriveOpenOutcome.FallbackToBrowser(item.viewUrl))
+
+                if (totalBytes <= 0L) {
+                    tmpFile.delete()
+                    return null
+                }
+
+                if (targetFile.exists()) targetFile.delete()
+                tmpFile.renameTo(targetFile)
+
+                val exported = exportFileToDownloadsFolder(context, targetFile, resolvedMime)
+                Result.success(DriveOpenOutcome.LocalFileReady(targetFile, resolvedMime, exported))
             }
+        } catch (_: Exception) {
+            null
         }
+    }
+
+    /**
+     * Copies downloaded course/Drive file into public Downloads/UniCore on Android 10+ (API 29+)
+     * via MediaStore without requiring any storage permissions (Play Policy compliant).
+     */
+    fun exportFileToDownloadsFolder(context: Context, sourceFile: File, mimeType: String): Boolean {
+        if (!sourceFile.exists() || sourceFile.length() <= 0L) return false
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = context.contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, sourceFile.name)
+                    put(MediaStore.Downloads.MIME_TYPE, mimeType.ifBlank { "application/octet-stream" })
+                    put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/UniCore")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val itemUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
+                try {
+                    resolver.openOutputStream(itemUri)?.use { out ->
+                        sourceFile.inputStream().use { inp -> inp.copyTo(out) }
+                    }
+                    values.clear()
+                    values.put(MediaStore.Downloads.IS_PENDING, 0)
+                    resolver.update(itemUri, values, null, null)
+                    true
+                } catch (_: Exception) {
+                    runCatching { resolver.delete(itemUri, null, null) }
+                    false
+                }
+            } else {
+                // Below API 29, keep file inside app-private Downloads subfolder without requesting WRITE_EXTERNAL_STORAGE
+                val appDownloads = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "UniCore").apply { mkdirs() }
+                val dest = File(appDownloads, sourceFile.name)
+                sourceFile.inputStream().use { inp ->
+                    FileOutputStream(dest).use { out -> inp.copyTo(out) }
+                }
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    internal fun extractConfirmDownloadUrl(html: String, baseUrl: String): String? {
+        val formMatch = Regex(
+            """<form\b[^>]*id=["']download-form["'][^>]*action=["']([^"']+)["'][^>]*>([\s\S]*?)</form>""",
+            RegexOption.IGNORE_CASE
+        ).find(html)
+        if (formMatch != null) {
+            val action = unescapeHtml(formMatch.groupValues[1])
+            val body = formMatch.groupValues[2]
+            val params = mutableListOf<String>()
+            val inputRegex = Regex("""<input\b([^>]+)>""", RegexOption.IGNORE_CASE)
+            inputRegex.findAll(body).forEach { m ->
+                val attrs = m.groupValues[1]
+                val name = Regex("""name=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(attrs)?.groupValues?.get(1)
+                val value = Regex("""value=["']([^"']*)["']""", RegexOption.IGNORE_CASE).find(attrs)?.groupValues?.get(1) ?: ""
+                if (!name.isNullOrBlank()) {
+                    params.add("${URLEncoder.encode(name, "UTF-8")}=${URLEncoder.encode(unescapeHtml(value), "UTF-8")}")
+                }
+            }
+            val resolvedBase = baseUrl.toHttpUrlOrNull()?.resolve(action)?.toString() ?: action
+            val sep = if (resolvedBase.contains('?')) "&" else "?"
+            return if (params.isEmpty()) resolvedBase else "$resolvedBase$sep${params.joinToString("&")}"
+        }
+
+        val hrefMatch = Regex("""href=["']([^"']*confirm=[^"']+)["']""", RegexOption.IGNORE_CASE).find(html)
+        if (hrefMatch != null) {
+            val raw = unescapeHtml(hrefMatch.groupValues[1])
+            return baseUrl.toHttpUrlOrNull()?.resolve(raw)?.toString() ?: raw
+        }
+        return null
+    }
+
+    private fun isAllowedGoogleDownloadUrl(rawUrl: String): Boolean {
+        val host = rawUrl.toHttpUrlOrNull()?.host?.lowercase() ?: return false
+        return host == "drive.google.com" ||
+            host == "drive.usercontent.google.com" ||
+            host == "docs.google.com" ||
+            host.endsWith(".googleusercontent.com") ||
+            host.endsWith(".usercontent.google.com")
+    }
 
     fun openLocalFileWithIntent(context: Context, file: File, mimeType: String): Result<Unit> {
         return try {

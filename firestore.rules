@@ -52,8 +52,10 @@ service cloud.firestore {
 
     function isActiveAccount() {
       return isSuperAdmin() || !(
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('accountDisabled', false) == true
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && (
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('accountDisabled', false) == true ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('banUntilMillis', 0) > request.time.toMillis()
+        )
       );
     }
 
@@ -125,6 +127,8 @@ service cloud.firestore {
         data.writesToday is int && data.writesToday >= 0 && data.writesToday <= 5000 &&
         data.quotaDayKey is string && data.quotaDayKey.size() >= 8 && data.quotaDayKey.size() <= 16 &&
         (!('accountDisabled' in data) || data.accountDisabled is bool) &&
+        (!('banUntilMillis' in data) || (data.banUntilMillis is int && data.banUntilMillis >= 0)) &&
+        (!('banReason' in data) || (data.banReason is string && data.banReason.size() <= 200)) &&
         isValidTimestamp(data.createdAt) &&
         isValidTimestamp(data.updatedAt);
     }
@@ -212,6 +216,16 @@ service cloud.firestore {
       return data.courseId is string && isValidId(data.courseId) &&
         data.title is string && data.title.size() >= 3 && data.title.size() <= 100 &&
         data.durationMinutes is int && data.durationMinutes >= 1 && data.durationMinutes <= 180 &&
+        (!('startAtMillis' in data) || (data.startAtMillis is int && data.startAtMillis >= 0)) &&
+        (!('endAtMillis' in data) || (data.endAtMillis is int && data.endAtMillis >= 0)) &&
+        (!('hasImage' in data) || data.hasImage is bool) &&
+        (
+          !('hasImage' in data) || data.hasImage == false || (
+            data.imageName is string && data.imageName.size() >= 1 && data.imageName.size() <= 140 &&
+            data.imageMimeType in ['image/png', 'image/jpeg'] &&
+            data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 4
+          )
+        ) &&
         data.questionPrompts is list && data.questionPrompts.size() >= 1 && data.questionPrompts.size() <= 20 &&
         data.questionPrompts[0] is string &&
         data.optionBlocks is list && data.optionBlocks.size() == data.questionPrompts.size() &&
@@ -239,9 +253,10 @@ service cloud.firestore {
         data.quizTitle is string && data.quizTitle.size() >= 1 && data.quizTitle.size() <= 100 &&
         data.selectedIndices is list && data.selectedIndices.size() >= 1 && data.selectedIndices.size() <= 20 &&
         data.selectedIndices[0] is int &&
-        data.status in ['SUBMITTED', 'GRADED'] &&
+        data.status in ['SUBMITTED', 'GRADED', 'CANCELLED_VIOLATION'] &&
         data.score is int && data.score >= 0 && data.score <= 100 &&
         data.graded is bool &&
+        (!('cancellationReason' in data) || (data.cancellationReason is string && data.cancellationReason.size() <= 200)) &&
         (!('gradedBy' in data) || (data.gradedBy is string && isValidId(data.gradedBy))) &&
         isValidTimestamp(data.createdAt) &&
         isValidTimestamp(data.updatedAt);
@@ -257,6 +272,7 @@ service cloud.firestore {
           'ROLE_CHANGED',
           'SETTINGS_CHANGED',
           'QUIZ_SUBMITTED',
+          'QUIZ_VIOLATION_CANCELLED',
           'GRADE_FINALIZED',
           'FILE_UPLOAD_VERIFIED',
           'FILE_UPLOAD_REJECTED',
@@ -267,8 +283,11 @@ service cloud.firestore {
           'NOTIFICATION_SENT',
           'DRIVE_FOLDER_LINKED',
           'ACCOUNT_STATUS_CHANGED',
+          'ACCOUNT_BANNED',
           'SUPPORT_MESSAGE_SENT',
-          'DEPARTMENT_UPDATED'
+          'DEPARTMENT_UPDATED',
+          'PROFANITY_BLOCKED',
+          'CHAT_MESSAGE_DELETED'
         ] &&
         data.severity in ['INFO', 'WARN', 'HIGH', 'CRITICAL'] &&
         data.targetPath is string && data.targetPath.size() >= 1 && data.targetPath.size() <= 180 &&
@@ -306,11 +325,38 @@ service cloud.firestore {
         data.subject is string && data.subject.size() >= 2 && data.subject.size() <= 100 &&
         data.body is string && data.body.size() >= 2 && data.body.size() <= 800 &&
         data.status in ['OPEN', 'REPLIED'] &&
+        (!('attachmentBase64' in data) || (
+          data.attachmentBase64 is string && data.attachmentBase64.size() >= 1 && data.attachmentBase64.size() <= 700000 &&
+          data.attachmentMimeType in ['image/png', 'image/jpeg'] &&
+          data.attachmentName is string && data.attachmentName.size() >= 1 && data.attachmentName.size() <= 140
+        )) &&
         (!('replyText' in data) || (data.replyText is string && data.replyText.size() >= 1 && data.replyText.size() <= 800)) &&
+        (!('replyAttachmentBase64' in data) || (
+          data.replyAttachmentBase64 is string && data.replyAttachmentBase64.size() >= 1 && data.replyAttachmentBase64.size() <= 700000 &&
+          data.replyAttachmentMimeType in ['image/png', 'image/jpeg'] &&
+          data.replyAttachmentName is string && data.replyAttachmentName.size() >= 1 && data.replyAttachmentName.size() <= 140
+        )) &&
         (!('repliedByUid' in data) || (data.repliedByUid is string && isValidId(data.repliedByUid))) &&
         (!('repliedByName' in data) || (data.repliedByName is string && data.repliedByName.size() >= 2 && data.repliedByName.size() <= 60)) &&
         isValidTimestamp(data.createdAt) &&
         isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidChatMessage(data) {
+      return data.roomId is string && isValidId(data.roomId) &&
+        data.senderUid is string && isValidId(data.senderUid) &&
+        data.senderName is string && data.senderName.size() >= 2 && data.senderName.size() <= 60 &&
+        data.senderRole in ['STUDENT', 'ADMIN', 'SUPER_ADMIN'] &&
+        data.text is string && data.text.size() <= 800 &&
+        (data.text.size() >= 1 || ('attachmentBase64' in data && data.attachmentBase64 is string && data.attachmentBase64.size() >= 1)) &&
+        (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() <= 80)) &&
+        (!('academicYear' in data) || (data.academicYear is string && data.academicYear.size() <= 40)) &&
+        (!('attachmentBase64' in data) || (
+          data.attachmentBase64 is string && data.attachmentBase64.size() >= 1 && data.attachmentBase64.size() <= 700000 &&
+          data.attachmentMimeType in ['image/png', 'image/jpeg'] &&
+          data.attachmentName is string && data.attachmentName.size() >= 1 && data.attachmentName.size() <= 140
+        )) &&
+        isValidTimestamp(data.createdAt);
     }
 
     // --- Collection Rules ---
@@ -387,11 +433,13 @@ service cloud.firestore {
         incoming().aiCallsToday == 0 &&
         incoming().writesToday == 0 &&
         (!('accountDisabled' in incoming()) || incoming().accountDisabled == false) &&
+        (!('banUntilMillis' in incoming()) || incoming().banUntilMillis == 0) &&
         incoming().keys().hasAll([
           'userId', 'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'createdAt', 'updatedAt'
         ]) &&
         incoming().keys().hasOnly([
-          'userId', 'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'accountDisabled', 'createdAt', 'updatedAt'
+          'userId', 'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey',
+          'accountDisabled', 'banUntilMillis', 'banReason', 'createdAt', 'updatedAt'
         ]) &&
         isValidUserProfile(incoming());
       allow update: if isSignedIn() &&
@@ -410,12 +458,23 @@ service cloud.firestore {
               'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'updatedAt'
             ])
           ) || (
+            isAdmin() &&
+            isActiveAccount() &&
+            existing().role == 'STUDENT' &&
+            userId != request.auth.uid &&
+            incoming().role == existing().role &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'banUntilMillis', 'banReason', 'updatedAt'
+            ])
+          ) || (
             isSuperAdmin() &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'accountDisabled', 'updatedAt'
+              'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey',
+              'accountDisabled', 'banUntilMillis', 'banReason', 'updatedAt'
             ]) &&
             (
-              !('accountDisabled' in incoming().diff(existing()).affectedKeys()) ||
+              (!('accountDisabled' in incoming().diff(existing()).affectedKeys()) &&
+               !('banUntilMillis' in incoming().diff(existing()).affectedKeys())) ||
               userId != request.auth.uid
             )
           )
@@ -558,7 +617,9 @@ service cloud.firestore {
           'courseId', 'title', 'durationMinutes', 'questionPrompts', 'optionBlocks', 'published', 'createdBy', 'createdAt', 'updatedAt'
         ]) &&
         incoming().keys().hasOnly([
-          'courseId', 'title', 'durationMinutes', 'questionPrompts', 'optionBlocks', 'published', 'createdBy', 'createdAt', 'updatedAt'
+          'courseId', 'title', 'durationMinutes', 'startAtMillis', 'endAtMillis',
+          'hasImage', 'imageName', 'imageMimeType', 'chunkCount',
+          'questionPrompts', 'optionBlocks', 'published', 'createdBy', 'createdAt', 'updatedAt'
         ]) &&
         isValidQuiz(incoming()) &&
         exists(/databases/$(database)/documents/courses/$(incoming().courseId));
@@ -569,9 +630,28 @@ service cloud.firestore {
         incoming().createdBy == existing().createdBy &&
         incoming().createdAt == existing().createdAt &&
         incoming().diff(existing()).affectedKeys().hasOnly([
-          'title', 'durationMinutes', 'questionPrompts', 'optionBlocks', 'published', 'updatedAt'
+          'title', 'durationMinutes', 'startAtMillis', 'endAtMillis',
+          'hasImage', 'imageName', 'imageMimeType', 'chunkCount',
+          'questionPrompts', 'optionBlocks', 'published', 'updatedAt'
         ]);
       allow delete: if isAdmin() && isActiveAccount() && isValidId(quizId);
+
+      // Quiz Figure Image Chunks
+      match /assets/{chunkId} {
+        allow get, list: if isSignedIn() && isActiveAccount() && isValidId(quizId) && (
+          isAdmin() ||
+          get(/databases/$(database)/documents/quizzes/$(quizId)).data.published == true
+        );
+        allow create: if isAdmin() && isActiveAccount() &&
+          isValidId(quizId) &&
+          isValidId(chunkId) &&
+          incoming().keys().hasAll(['chunkIndex', 'data', 'createdAt']) &&
+          incoming().keys().hasOnly(['chunkIndex', 'data', 'createdAt']) &&
+          isValidCourseChunk(incoming()) &&
+          exists(/databases/$(database)/documents/quizzes/$(quizId));
+        allow update: if false;
+        allow delete: if isAdmin() && isActiveAccount() && isValidId(quizId) && isValidId(chunkId);
+      }
 
       // Split Collection: Protected Answer Key accessible ONLY to Active Admins/SuperAdmins
       match /private/{docId} {
@@ -604,22 +684,25 @@ service cloud.firestore {
         isValidId(attemptId) &&
         attemptId == (request.auth.uid + '_' + incoming().quizId) &&
         incoming().userId == request.auth.uid &&
-        incoming().status == 'SUBMITTED' &&
         incoming().score == 0 &&
-        incoming().graded == false &&
         !('gradedBy' in incoming()) &&
+        (
+          (incoming().status == 'SUBMITTED' && incoming().graded == false) ||
+          (incoming().status == 'CANCELLED_VIOLATION' && incoming().graded == true &&
+           'cancellationReason' in incoming() && incoming().cancellationReason.size() >= 3)
+        ) &&
         incoming().keys().hasAll([
           'userId', 'studentName', 'quizId', 'quizTitle', 'selectedIndices', 'status', 'score', 'graded', 'createdAt', 'updatedAt'
         ]) &&
         incoming().keys().hasOnly([
-          'userId', 'studentName', 'quizId', 'quizTitle', 'selectedIndices', 'status', 'score', 'graded', 'createdAt', 'updatedAt'
+          'userId', 'studentName', 'quizId', 'quizTitle', 'selectedIndices', 'status', 'score', 'graded', 'cancellationReason', 'createdAt', 'updatedAt'
         ]) &&
         isValidQuizAttempt(incoming()) &&
         exists(/databases/$(database)/documents/quizzes/$(incoming().quizId));
       allow update: if isAdmin() && isActiveAccount() &&
         isValidId(attemptId) &&
         isValidQuizAttempt(incoming()) &&
-        (existing().status != 'GRADED' || isSuperAdmin()) &&
+        (existing().status == 'SUBMITTED' || isSuperAdmin()) &&
         incoming().status == 'GRADED' &&
         incoming().graded == true &&
         incoming().gradedBy == request.auth.uid &&
@@ -628,7 +711,7 @@ service cloud.firestore {
         incoming().selectedIndices == existing().selectedIndices &&
         incoming().createdAt == existing().createdAt &&
         incoming().diff(existing()).affectedKeys().hasOnly(['score', 'graded', 'status', 'gradedBy', 'updatedAt']);
-      allow delete: if false;
+      allow delete: if isValidId(attemptId) && isSuperAdmin();
     }
 
     // Security Audit Logs: Read strictly restricted to SUPER_ADMIN only (hidden from Students and Regular Admins)
@@ -740,7 +823,9 @@ service cloud.firestore {
           'channel', 'senderUid', 'senderName', 'senderRole', 'subject', 'body', 'status', 'createdAt', 'updatedAt'
         ]) &&
         incoming().keys().hasOnly([
-          'channel', 'senderUid', 'senderName', 'senderRole', 'subject', 'body', 'status', 'createdAt', 'updatedAt'
+          'channel', 'senderUid', 'senderName', 'senderRole', 'subject', 'body',
+          'attachmentBase64', 'attachmentMimeType', 'attachmentName',
+          'status', 'createdAt', 'updatedAt'
         ]) &&
         isValidSupportMessage(incoming()) && (
           (!isAdmin() && incoming().channel == 'STUDENT_TO_ADMIN' && incoming().senderRole == 'STUDENT') ||
@@ -759,12 +844,43 @@ service cloud.firestore {
         incoming().status == 'REPLIED' &&
         incoming().repliedByUid == request.auth.uid &&
         incoming().diff(existing()).affectedKeys().hasOnly([
-          'status', 'replyText', 'repliedByUid', 'repliedByName', 'updatedAt'
+          'status', 'replyText', 'replyAttachmentBase64', 'replyAttachmentMimeType', 'replyAttachmentName',
+          'repliedByUid', 'repliedByName', 'updatedAt'
         ]) && (
           (existing().channel == 'STUDENT_TO_ADMIN' && isAdmin()) ||
           (existing().channel == 'ADMIN_TO_SUPER' && isSuperAdmin())
         );
       allow delete: if isValidId(messageId) && isSuperAdmin();
+    }
+
+    // Department & Academic Year Student Group Chat Rooms
+    match /chat_rooms/{roomId}/messages/{messageId} {
+      allow get, list: if isSignedIn() && isActiveAccount() && isValidId(roomId);
+      allow create: if isSignedIn() && isActiveAccount() &&
+        isValidId(roomId) &&
+        isValidId(messageId) &&
+        incoming().roomId == roomId &&
+        incoming().senderUid == request.auth.uid &&
+        (
+          incoming().senderRole == 'STUDENT' ||
+          (incoming().senderRole == 'ADMIN' && isAdmin()) ||
+          (incoming().senderRole == 'SUPER_ADMIN' && isSuperAdmin())
+        ) &&
+        incoming().keys().hasAll([
+          'roomId', 'senderUid', 'senderName', 'senderRole', 'text', 'createdAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'roomId', 'departmentName', 'academicYear',
+          'senderUid', 'senderName', 'senderRole', 'text',
+          'attachmentBase64', 'attachmentMimeType', 'attachmentName',
+          'createdAt'
+        ]) &&
+        isValidChatMessage(incoming());
+      allow update: if false;
+      allow delete: if isSignedIn() && isActiveAccount() &&
+        isValidId(roomId) && isValidId(messageId) && (
+          existing().senderUid == request.auth.uid || isAdmin()
+        );
     }
   }
 }
