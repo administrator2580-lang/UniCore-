@@ -1,0 +1,79 @@
+name: Build UniCore Windows EXE
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows Installer & Portable EXE
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Firebase config from GitHub Secrets (if available)
+        shell: bash
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ ! -f app/google-services.json ]; then
+            if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+              printf '%s\n' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+              echo "Restored app/google-services.json from GOOGLE_SERVICES_JSON secret."
+            else
+              echo "::notice::app/google-services.json is absent; relying on VITE_FIREBASE_* secrets or runtime connection settings."
+            fi
+          fi
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: desktop-web/package-lock.json
+
+      - name: Install desktop-web dependencies
+        shell: bash
+        working-directory: desktop-web
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Validate Electron syntax
+        shell: bash
+        working-directory: desktop-web
+        run: npm run check
+
+      - name: Build production Vite web bundle
+        shell: bash
+        working-directory: desktop-web
+        env:
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_DATABASE_ID: ${{ secrets.VITE_FIREBASE_DATABASE_ID }}
+        run: npm run build
+
+      - name: Package Windows EXE (NSIS Installer & Portable)
+        shell: bash
+        working-directory: desktop-web
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: Upload UniCore Windows EXE Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: UniCore-Windows-EXE
+          path: desktop-web/release/*.exe
+          if-no-files-found: error
+          retention-days: 14

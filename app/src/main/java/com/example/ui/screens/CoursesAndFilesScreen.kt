@@ -665,7 +665,7 @@ private fun DriveSyncSectionCard(
                                                     Text(
                                                         text = fileItem.name,
                                                         style = MaterialTheme.typography.titleSmall,
-                                                        maxLines = 1,
+                                                        maxLines = 2,
                                                         overflow = TextOverflow.Ellipsis
                                                     )
                                                     Text(

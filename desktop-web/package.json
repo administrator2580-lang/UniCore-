@@ -1,0 +1,74 @@
+{
+  "name": "unicore-desktop-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "UniCore Smart University Portal - Web & Windows Desktop (Electron)",
+  "author": "UniCore Team",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "dev": "vite --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --port 4173",
+    "start": "electron .",
+    "dist:win": "vite build && electron-builder --win --x64",
+    "check": "node --check main.js && node --check preload.js"
+  },
+  "dependencies": {
+    "firebase": "^11.4.0",
+    "lucide-react": "^0.475.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8",
+    "vite": "^6.2.0"
+  },
+  "build": {
+    "appId": "com.aistudio.unicore.desktop",
+    "productName": "UniCore",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "build/icon.png",
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "UniCore-${version}-${arch}-${target}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "UniCore",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
+    }
+  }
+}

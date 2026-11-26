@@ -77,25 +77,30 @@ class GoogleDriveSyncRepository(
         val results = mutableListOf<DriveSyncedFile>()
         val seenIds = mutableSetOf<String>()
 
-        // Split by flip-entry containers used by Google Drive embeddedfolderview
-        val entryRegex = Regex(
-            """<div[^>]*class="[^"]*flip-entry[^"]*"[^>]*id="entry-([a-zA-Z0-9_-]{10,128})"[^>]*>(.*?)(?=<div[^>]*class="[^"]*flip-entry|$)""",
-            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+        // Match opening containers with id="entry-<ID>" regardless of attribute order,
+        // then slice until the next entry container so nested flip-entry-* divs never truncate blocks.
+        val entryStartRegex = Regex(
+            """<div\b[^>]*\bid=["']entry-([a-zA-Z0-9_-]{10,128})["'][^>]*>""",
+            RegexOption.IGNORE_CASE
         )
-        val titleRegex = Regex("""<div[^>]*class="[^"]*flip-entry-title[^"]*"[^>]*>(.*?)</div>""", RegexOption.DOT_MATCHES_ALL)
-        val hrefRegex = Regex("""href="(https://[^"]+)"""")
+        val entryMatches = entryStartRegex.findAll(html).toList()
+        val hrefRegex = Regex("""href=["'](https://[^"']+)["']""", RegexOption.IGNORE_CASE)
 
-        entryRegex.findAll(html).forEach { match ->
+        for (index in entryMatches.indices) {
+            val match = entryMatches[index]
             val itemId = match.groupValues[1]
-            val block = match.groupValues[2]
-            if (itemId == folder.folderId || !seenIds.add(itemId)) return@forEach
+            if (itemId == folder.folderId || !seenIds.add(itemId)) continue
 
-            val rawTitle = titleRegex.find(block)?.groupValues?.get(1)?.let { stripHtmlTags(it) } ?: "Drive Item"
-            val cleanTitle = InputValidator.sanitizeText(unescapeHtml(rawTitle)).take(140).ifBlank { "Drive Item" }
+            val blockStart = match.range.first
+            val blockEnd = if (index + 1 < entryMatches.size) entryMatches[index + 1].range.first else html.length
+            val block = html.substring(blockStart, blockEnd)
+
             val href = hrefRegex.find(block)?.groupValues?.get(1)?.let { unescapeHtml(it) }.orEmpty()
+            val cleanTitle = extractTitleFromEntryBlock(block, itemId)
 
             val isSubFolder = href.contains("/folders/", ignoreCase = true) ||
-                block.contains("folder-icon", ignoreCase = true)
+                block.contains("folder-icon", ignoreCase = true) ||
+                block.contains("flip-folder", ignoreCase = true)
 
             val viewUrl = when {
                 isSubFolder -> "https://drive.google.com/drive/folders/$itemId"
@@ -128,24 +133,33 @@ class GoogleDriveSyncRepository(
             )
         }
 
-        // Secondary fallback regex if Drive uses anchor-only layout without flip-entry IDs
+        // Secondary fallback regex if Drive uses anchor-only layout without entry- IDs
         if (results.isEmpty()) {
-            val linkRegex = Regex(
-                """https://drive\.google\.com/file/d/([a-zA-Z0-9_-]{10,128})/view""",
-                RegexOption.IGNORE_CASE
+            val anchorRegex = Regex(
+                """<a\b([^>]*href=["'](https://(?:drive|docs)\.google\.com/(?:file/d|document/d|presentation/d|spreadsheets/d|drive/folders)/([a-zA-Z0-9_-]{10,128})[^"']*)["'][^>]*)>(.*?)</a>""",
+                setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
             )
-            linkRegex.findAll(html).forEach { match ->
-                val itemId = match.groupValues[1]
+            anchorRegex.findAll(html).forEach { match ->
+                val attrs = match.groupValues[1]
+                val href = unescapeHtml(match.groupValues[2])
+                val itemId = match.groupValues[3]
+                val inner = stripHtmlTags(unescapeHtml(match.groupValues[4]))
+                val attrTitle = Regex("""\b(?:title|aria-label)=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                    .find(attrs)?.groupValues?.get(1)?.let { unescapeHtml(it) }.orEmpty()
+                val title = InputValidator.sanitizeText(inner.ifBlank { attrTitle })
+                    .take(140)
+                    .ifBlank { "Drive File (${itemId.take(8)})" }
                 if (itemId != folder.folderId && seenIds.add(itemId)) {
+                    val isSub = href.contains("/folders/", ignoreCase = true)
                     results.add(
                         DriveSyncedFile(
                             fileId = itemId,
                             folderId = folder.folderId,
                             folderTitle = folder.title,
-                            name = "Drive File (${itemId.take(8)})",
-                            isSubFolder = false,
-                            mimeHint = "application/pdf",
-                            viewUrl = "https://drive.google.com/file/d/$itemId/view",
+                            name = title,
+                            isSubFolder = isSub,
+                            mimeHint = inferMimeHint(title, isSub, href),
+                            viewUrl = href,
                             downloadUrl = "https://drive.google.com/uc?export=download&id=$itemId"
                         )
                     )
@@ -166,22 +180,34 @@ class GoogleDriveSyncRepository(
             if (item.isSubFolder) {
                 return@withContext Result.success(DriveOpenOutcome.FallbackToBrowser(item.viewUrl))
             }
-            val ext = item.name.substringAfterLast('.', "").lowercase()
-            if (ext in BLOCKED_FILE_EXTENSIONS) {
-                return@withContext Result.failure(SecurityException("Blocked executable extension '.$ext' from Google Drive."))
+            val safeFileId = item.fileId.replace(Regex("[^a-zA-Z0-9_-]"), "").take(128)
+                .ifBlank { return@withContext Result.failure(SecurityException("Invalid Drive file identifier.")) }
+
+            val initialExt = item.name.substringAfterLast('.', "").lowercase()
+            if (initialExt in BLOCKED_FILE_EXTENSIONS) {
+                return@withContext Result.failure(SecurityException("Blocked executable extension '.$initialExt' from Google Drive."))
             }
 
-            val cacheDir = File(context.filesDir, "course_cache").apply { mkdirs() }
-            val safeName = item.name.replace(Regex("[^a-zA-Z0-9._\\-\\u0600-\\u06FF ]"), "_").take(80)
-                .ifBlank { "drive_file_${item.fileId.take(8)}" }
+            val cacheRoot = File(context.filesDir, "course_cache").apply { mkdirs() }
+            // Clean up any legacy prefixed cache entries (which included gdrive_<id>_ or old "Drive Item")
+            cacheRoot.listFiles()?.filter { it.isFile && it.name.startsWith("gdrive_${safeFileId}_") }
+                ?.forEach { runCatching { it.delete() } }
 
-            // Return existing non-empty cached copy matching ID prefix if present
-            val existing = cacheDir.listFiles()?.firstOrNull {
-                it.name.startsWith("gdrive_${item.fileId}_") && it.length() > 0L
+            val itemCacheDir = File(cacheRoot, "gdrive_$safeFileId").apply { mkdirs() }
+            if (!itemCacheDir.canonicalPath.startsWith(cacheRoot.canonicalPath + File.separator)) {
+                return@withContext Result.failure(SecurityException("Invalid cache folder path."))
             }
-            if (existing != null) {
-                val cachedMime = inferMimeFromExtension(existing.extension, item.mimeHint)
-                return@withContext Result.success(DriveOpenOutcome.LocalFileReady(existing, cachedMime))
+
+            val cachedValid = itemCacheDir.listFiles()?.firstOrNull { file ->
+                file.isFile &&
+                    !file.name.endsWith(".tmp") &&
+                    !file.name.startsWith("Drive Item", ignoreCase = true) &&
+                    !file.name.startsWith("Drive File", ignoreCase = true) &&
+                    file.length() > 0L
+            }
+            if (cachedValid != null) {
+                val cachedMime = inferMimeFromExtension(cachedValid.extension, item.mimeHint)
+                return@withContext Result.success(DriveOpenOutcome.LocalFileReady(cachedValid, cachedMime))
             }
 
             try {
@@ -204,28 +230,53 @@ class GoogleDriveSyncRepository(
                         return@withContext Result.success(DriveOpenOutcome.FallbackToBrowser(item.viewUrl))
                     }
 
+                    val headerFileName = extractFileNameFromContentDisposition(response.header("Content-Disposition"))
+                    val chosenRawName = when {
+                        !headerFileName.isNullOrBlank() &&
+                            !headerFileName.equals("download", ignoreCase = true) &&
+                            !headerFileName.startsWith("Drive Item", ignoreCase = true) -> headerFileName
+                        else -> item.name
+                    }
+
+                    val sanitizedBaseName = sanitizeDownloadFileName(
+                        chosenRawName,
+                        fallback = "drive_file_${safeFileId.take(8)}"
+                    )
+                    val detectedExt = sanitizedBaseName.substringAfterLast('.', "").lowercase()
+                    if (detectedExt in BLOCKED_FILE_EXTENSIONS) {
+                        return@withContext Result.failure(
+                            SecurityException("Blocked executable extension '.$detectedExt' from Google Drive.")
+                        )
+                    }
+
                     val resolvedMime = when {
                         contentType.isNotBlank() && contentType != "application/octet-stream" -> contentType
-                        else -> item.mimeHint
+                        else -> inferMimeFromExtension(detectedExt, item.mimeHint)
                     }
                     val resolvedExt = when {
-                        safeName.contains('.') -> safeName.substringAfterLast('.').lowercase()
+                        sanitizedBaseName.contains('.') && detectedExt.isNotBlank() && detectedExt.length <= 8 -> detectedExt
                         resolvedMime == "application/pdf" -> "pdf"
                         resolvedMime == "image/png" -> "png"
                         resolvedMime == "image/jpeg" -> "jpg"
+                        resolvedMime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> "docx"
+                        resolvedMime == "application/msword" -> "doc"
+                        resolvedMime == "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> "pptx"
+                        resolvedMime == "application/vnd.ms-powerpoint" -> "ppt"
+                        resolvedMime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" -> "xlsx"
                         else -> "pdf"
                     }
-                    val finalFileName = if (safeName.contains('.')) {
-                        "gdrive_${item.fileId}_$safeName"
+                    val finalFileName = if (sanitizedBaseName.contains('.') && detectedExt.length in 1..8) {
+                        sanitizedBaseName
                     } else {
-                        "gdrive_${item.fileId}_$safeName.$resolvedExt"
+                        "$sanitizedBaseName.$resolvedExt"
                     }
-                    val targetFile = File(cacheDir, finalFileName)
-                    if (!targetFile.canonicalPath.startsWith(cacheDir.canonicalPath + File.separator)) {
+
+                    val targetFile = File(itemCacheDir, finalFileName)
+                    if (!targetFile.canonicalPath.startsWith(itemCacheDir.canonicalPath + File.separator)) {
                         return@withContext Result.failure(SecurityException("Invalid cache destination path."))
                     }
 
-                    val tmpFile = File(cacheDir, "$finalFileName.tmp")
+                    val tmpFile = File(itemCacheDir, "$finalFileName.tmp")
                     var totalBytes = 0L
                     body.byteStream().use { input ->
                         FileOutputStream(tmpFile).use { output ->
@@ -275,16 +326,76 @@ class GoogleDriveSyncRepository(
         }
     }
 
+    private fun extractTitleFromEntryBlock(block: String, itemId: String): String {
+        val titlePatterns = listOf(
+            Regex("""<(?:div|span|p)\b[^>]*class=["'][^"']*\bflip-entry-title\b[^"']*["'][^>]*>(.*?)</(?:div|span|p)>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)),
+            Regex("""<a\b[^>]*href=["']https://[^"']+["'][^>]*\b(?:title|aria-label)=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+            Regex("""<a\b[^>]*href=["']https://[^"']+["'][^>]*>(.*?)</a>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+        )
+        for (pattern in titlePatterns) {
+            pattern.findAll(block).forEach { candidateMatch ->
+                val raw = stripHtmlTags(unescapeHtml(candidateMatch.groupValues[1]))
+                val clean = InputValidator.sanitizeText(raw).take(140)
+                if (clean.isNotBlank() && !clean.equals("Open", ignoreCase = true)) {
+                    return clean
+                }
+            }
+        }
+        return "Drive File (${itemId.take(8)})"
+    }
+
+    internal fun extractFileNameFromContentDisposition(header: String?): String? {
+        if (header.isNullOrBlank()) return null
+        val utf8Match = Regex("""filename\*\s*=\s*(?:UTF-8|utf-8)''([^;\r\n]+)""", RegexOption.IGNORE_CASE).find(header)
+        if (utf8Match != null) {
+            val decoded = runCatching {
+                java.net.URLDecoder.decode(utf8Match.groupValues[1].trim().trim('"', '\''), "UTF-8")
+            }.getOrNull()
+            if (!decoded.isNullOrBlank()) return decoded
+        }
+        val quotedMatch = Regex("""filename\s*=\s*"([^"]+)"""", RegexOption.IGNORE_CASE).find(header)
+        if (quotedMatch != null && quotedMatch.groupValues[1].isNotBlank()) {
+            return quotedMatch.groupValues[1].trim()
+        }
+        val plainMatch = Regex("""filename\s*=\s*([^;\r\n]+)""", RegexOption.IGNORE_CASE).find(header)
+        if (plainMatch != null && plainMatch.groupValues[1].isNotBlank()) {
+            return plainMatch.groupValues[1].trim().trim('"', '\'')
+        }
+        return null
+    }
+
+    private fun sanitizeDownloadFileName(rawName: String, fallback: String): String {
+        val noPath = rawName.substringAfterLast('/').substringAfterLast('\\')
+        val cleaned = noPath
+            .replace(Regex("[\\u0000-\\u001F<>:\"/\\\\|?*]"), "_")
+            .replace(Regex("\\s+"), " ")
+            .trim('.', ' ')
+            .take(100)
+        return cleaned.ifBlank { fallback }
+    }
+
     private fun stripHtmlTags(raw: String): String =
         raw.replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
 
-    private fun unescapeHtml(raw: String): String =
-        raw.replace("&amp;", "&")
+    internal fun unescapeHtml(raw: String): String {
+        val named = raw
+            .replace("&amp;", "&")
             .replace("&lt;", "<")
             .replace("&gt;", ">")
             .replace("&quot;", "\"")
+            .replace("&apos;", "'")
             .replace("&#39;", "'")
             .replace("&#x27;", "'")
+            .replace("&nbsp;", " ")
+        val decReplaced = Regex("&#(\\d+);").replace(named) { m ->
+            val code = m.groupValues[1].toIntOrNull()
+            if (code != null && code in 32..0x10FFFF) String(Character.toChars(code)) else m.value
+        }
+        return Regex("&#x([0-9a-fA-F]+);").replace(decReplaced) { m ->
+            val code = m.groupValues[1].toIntOrNull(16)
+            if (code != null && code in 32..0x10FFFF) String(Character.toChars(code)) else m.value
+        }
+    }
 
     private fun inferMimeHint(name: String, isSubFolder: Boolean, href: String): String {
         if (isSubFolder) return "inode/directory"
@@ -295,6 +406,7 @@ class GoogleDriveSyncRepository(
             lower.endsWith(".jpg") || lower.endsWith(".jpeg") -> "image/jpeg"
             lower.endsWith(".ppt") || lower.endsWith(".pptx") -> "application/vnd.ms-powerpoint"
             lower.endsWith(".doc") || lower.endsWith(".docx") -> "application/msword"
+            lower.endsWith(".xls") || lower.endsWith(".xlsx") -> "application/vnd.ms-excel"
             else -> "application/pdf"
         }
     }
@@ -303,6 +415,11 @@ class GoogleDriveSyncRepository(
         "pdf" -> "application/pdf"
         "png" -> "image/png"
         "jpg", "jpeg" -> "image/jpeg"
+        "ppt" -> "application/vnd.ms-powerpoint"
+        "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        "doc" -> "application/msword"
+        "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        "xls", "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         else -> fallback
     }
 }
