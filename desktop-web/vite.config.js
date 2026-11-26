@@ -10,6 +10,7 @@ function readAndroidFirebaseFallback() {
     messagingSenderId: '324526157499',
     storageBucket: 'gen-lang-client-0870704520.firebasestorage.app',
     firestoreDatabaseId: 'ai-studio-android-unicore-9b169dd7-0f78-40f7-9411-0587832d12de',
+    appId: '',
     webClientId: '',
     recaptchaSiteKey: ''
   };
@@ -22,6 +23,9 @@ function readAndroidFirebaseFallback() {
       if (gs?.project_info?.project_number) result.messagingSenderId = gs.project_info.project_number;
       if (gs?.project_info?.storage_bucket) result.storageBucket = gs.project_info.storage_bucket;
       const client = gs?.client?.[0];
+      if (client?.client_info?.mobilesdk_app_id) {
+        result.appId = client.client_info.mobilesdk_app_id;
+      }
       if (client?.api_key?.[0]?.current_key) {
         result.apiKey = client.api_key[0].current_key;
       }
@@ -61,7 +65,7 @@ export default defineConfig(({ mode }) => {
     projectId,
     storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || fallback.storageBucket,
     messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || fallback.messagingSenderId,
-    appId: env.VITE_FIREBASE_APP_ID || '',
+    appId: env.VITE_FIREBASE_APP_ID || fallback.appId,
     firestoreDatabaseId: env.VITE_FIREBASE_DATABASE_ID || fallback.firestoreDatabaseId,
     webClientId: env.VITE_GOOGLE_WEB_CLIENT_ID || fallback.webClientId,
     recaptchaSiteKey: env.VITE_RECAPTCHA_SITE_KEY || fallback.recaptchaSiteKey

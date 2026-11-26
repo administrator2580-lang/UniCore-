@@ -11,11 +11,11 @@ export async function askAiTutorStream({
   signal,
   onPartial
 }) {
-  if (!config?.appId) {
+  if (!config?.appId && !app?.options?.appId) {
     throw new Error(
       language === 'ARABIC'
-        ? 'يتطلب المساعد الذكي على الويب/الكمبيوتر إضافة Web App ID في Firebase Console -> Project Settings ثم إضافته في إعدادات الربط أو متغير VITE_FIREBASE_APP_ID.'
-        : 'Web/Desktop AI Tutor requires registering a Web App in Firebase Console -> Project Settings and setting its App ID in Connection Settings or VITE_FIREBASE_APP_ID.'
+        ? 'يرجى إضافة App ID في إعدادات الربط (أيقونة الترس في شاشة الدخول) أو متغير VITE_FIREBASE_APP_ID لتشغيل المساعد الذكي.'
+        : 'Please set a Firebase App ID in Connection Settings or VITE_FIREBASE_APP_ID to use AI Tutor.'
     );
   }
 

@@ -122,8 +122,10 @@ export function formatAuthError(err) {
     case 'auth/popup-closed-by-user':
     case 'auth/cancelled-popup-request':
       return 'تم إلغاء نافذة تسجيل الدخول بـ Google.';
-    case 'auth/unauthorized-domain':
-      return 'هذا النطاق غير مضاف في Firebase Console -> Authentication -> Settings -> Authorized domains.';
+    case 'auth/unauthorized-domain': {
+      const host = typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname : 'localhost';
+      return `النطاق (${host}) غير مضاف في Firebase Console -> Authentication -> Settings -> Authorized domains. أضف "${host}" ثم أعد المحاولة.`;
+    }
     case 'auth/operation-not-allowed':
       return 'تسجيل الدخول بـ Google غير مفعّل في Firebase Authentication -> Sign-in method.';
     case 'auth/user-disabled':
