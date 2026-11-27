@@ -20,6 +20,7 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    manifestPlaceholders["ADMOB_APP_ID"] = "ca-app-pub-3940256099942544~3347511713"
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -120,6 +121,7 @@ dependencies {
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
+  implementation(libs.play.services.ads)
   // implementation(libs.play.services.location)
   // implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)

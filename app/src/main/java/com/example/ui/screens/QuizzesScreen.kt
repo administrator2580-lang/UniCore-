@@ -110,13 +110,18 @@ fun QuizzesScreen(
     onCancelForViolation: (Quiz, List<Int>, String) -> Unit,
     onResetCancelledAttempt: (QuizAttempt) -> Unit,
     onGradeAttempt: (QuizAttempt) -> Unit,
-    onLoadQuizImage: suspend (Quiz) -> ByteArray?
+    onLoadQuizImage: suspend (Quiz) -> ByteArray?,
+    onQuizActiveChanged: (Boolean) -> Unit = {}
 ) {
     val strings = LocalAppStrings.current
     var activeQuizToTake by remember { mutableStateOf<Quiz?>(null) }
     var showCreateQuizDialog by remember { mutableStateOf(false) }
     var violationNoticeReason by remember { mutableStateOf<String?>(null) }
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    LaunchedEffect(activeQuizToTake) {
+        onQuizActiveChanged(activeQuizToTake != null)
+    }
 
     LaunchedEffect(Unit) {
         while (true) {

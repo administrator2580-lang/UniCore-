@@ -92,6 +92,8 @@ import com.example.data.repository.signOut
 import com.example.notifications.UniCoreNotificationManager
 import com.example.security.RateLimiter
 import com.example.security.configureAppCheck
+import com.example.ui.components.AdMobBannerBar
+import com.example.ui.components.initializeMobileAdsOnce
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.i18n.UniCoreStrings
 import com.example.ui.i18n.stringsFor
@@ -122,6 +124,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         configureAppCheck(this, intent)
+        initializeMobileAdsOnce(applicationContext)
         UniCoreNotificationManager.ensureChannel(applicationContext)
 
         enableEdgeToEdge()
@@ -263,6 +266,13 @@ private fun UniCoreAuthenticatedShell(
 
     var selectedTab by remember { mutableStateOf(UniCoreTab.COURSES) }
     var showNotificationsSheet by remember { mutableStateOf(false) }
+    var isTakingQuiz by remember { mutableStateOf(false) }
+
+    LaunchedEffect(selectedTab) {
+        if (selectedTab != UniCoreTab.QUIZZES) {
+            isTakingQuiz = false
+        }
+    }
 
     if (selectedTab != UniCoreTab.COURSES) {
         BackHandler { selectedTab = UniCoreTab.COURSES }
@@ -446,30 +456,35 @@ private fun UniCoreAuthenticatedShell(
             },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             bottomBar = {
-                if (!useNavigationRail) {
-                    NavigationBar {
-                        UniCoreTab.entries.forEach { tab ->
-                            val label = tab.label(strings)
-                            NavigationBarItem(
-                                selected = selectedTab == tab,
-                                onClick = { selectedTab = tab },
-                                icon = {
-                                    Icon(
-                                        imageVector = tab.icon,
-                                        contentDescription = label
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        text = label,
-                                        maxLines = 1,
-                                        softWrap = false,
-                                        fontSize = 11.sp,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                },
-                                modifier = Modifier.testTag(tab.testTag)
-                            )
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    if (!isTakingQuiz) {
+                        AdMobBannerBar(modifier = Modifier.fillMaxWidth())
+                    }
+                    if (!useNavigationRail) {
+                        NavigationBar {
+                            UniCoreTab.entries.forEach { tab ->
+                                val label = tab.label(strings)
+                                NavigationBarItem(
+                                    selected = selectedTab == tab,
+                                    onClick = { selectedTab = tab },
+                                    icon = {
+                                        Icon(
+                                            imageVector = tab.icon,
+                                            contentDescription = label
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = label,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            fontSize = 11.sp,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    },
+                                    modifier = Modifier.testTag(tab.testTag)
+                                )
+                            }
                         }
                     }
                 }
@@ -574,7 +589,8 @@ private fun UniCoreAuthenticatedShell(
                                 onCancelForViolation = viewModel::cancelQuizForViolation,
                                 onResetCancelledAttempt = viewModel::resetCancelledAttempt,
                                 onGradeAttempt = viewModel::gradeAttemptAsAdmin,
-                                onLoadQuizImage = viewModel::fetchQuizImageBytes
+                                onLoadQuizImage = viewModel::fetchQuizImageBytes,
+                                onQuizActiveChanged = { active -> isTakingQuiz = active }
                             )
                             UniCoreTab.CHAT -> StudyChatScreen(
                                 currentUserId = currentUserId,

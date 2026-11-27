@@ -261,5 +261,20 @@ class ExampleUnitTest {
       tempRoot.deleteRecursively()
     }
   }
+
+  @Test
+  fun adMobBannerUnitId_validatesOrFallsBackToTestUnitId() {
+    val valid = "ca-app-pub-1234567890123456/1234567890"
+    assertEquals(valid, com.example.ui.components.resolveBannerAdUnitId(valid))
+
+    assertEquals(
+      "ca-app-pub-3940256099942544/6300978111",
+      com.example.ui.components.resolveBannerAdUnitId("")
+    )
+    assertEquals(
+      "ca-app-pub-3940256099942544/6300978111",
+      com.example.ui.components.resolveBannerAdUnitId("invalid-id")
+    )
+  }
 }
 
