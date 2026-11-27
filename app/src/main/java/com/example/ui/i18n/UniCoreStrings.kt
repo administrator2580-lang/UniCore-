@@ -195,7 +195,12 @@ data class UniCoreStrings(
     val aiSourceAuto: String,
     val aiSourceNone: String,
     val aiSourcesPickerTitle: String,
-    val aiSourcesUsedPrefix: String
+    val aiSourcesUsedPrefix: String,
+    val manageStorageVault: String,
+    val storageVaultSubtitle: String,
+    val addStorageSource: String,
+    val editStorageSource: String,
+    val noStorageSourcesYet: String
 )
 
 val EnglishStrings = UniCoreStrings(
@@ -318,14 +323,14 @@ val EnglishStrings = UniCoreStrings(
     downloadAndOpenFile = "Open / Download",
     downloadingLabel = "Downloading...",
     optionalLinkAndNotes = "External Link (Optional)",
-    driveSyncTitle = "Google Drive Live Sync",
-    driveSyncSubtitle = "Files added to linked Drive folders appear automatically.",
-    linkDriveFolder = "Link Drive Folder",
-    driveFolderTitleLabel = "Folder Name",
-    driveFolderUrlLabel = "Google Drive Folder URL",
-    driveSharingNote = "Ensure folder access on Drive is set to 'Anyone with the link'.",
+    driveSyncTitle = "Course Files Library",
+    driveSyncSubtitle = "Uploaded study files and lectures ready to open or download directly.",
+    linkDriveFolder = "Manage Storage",
+    driveFolderTitleLabel = "Storage Label",
+    driveFolderUrlLabel = "Cloud Storage Folder URL",
+    driveSharingNote = "Super Admin only: link a shared Drive folder as background storage. Students only see its files natively in-app.",
     refreshDrive = "Refresh",
-    noDriveFilesYet = "No files detected in linked Drive folders yet.",
+    noDriveFilesYet = "No study files available in this section yet.",
     accountStatusActive = "Active",
     accountStatusDisabled = "Disabled",
     disableAccountAction = "Disable",
@@ -388,7 +393,12 @@ val EnglishStrings = UniCoreStrings(
     aiSourceAuto = "Auto from Uploaded Files",
     aiSourceNone = "General (No File)",
     aiSourcesPickerTitle = "Study File Source",
-    aiSourcesUsedPrefix = "Source"
+    aiSourcesUsedPrefix = "Source",
+    manageStorageVault = "File Storage (Super Admin)",
+    storageVaultSubtitle = "Manage linked cloud storage folders. Only Super Admin can view, edit, or delete storage links.",
+    addStorageSource = "Add Storage Link",
+    editStorageSource = "Edit Storage Link",
+    noStorageSourcesYet = "No storage folders connected yet."
 )
 
 val ArabicStrings = UniCoreStrings(
@@ -511,14 +521,14 @@ val ArabicStrings = UniCoreStrings(
     downloadAndOpenFile = "فتح / تحميل الملف",
     downloadingLabel = "جاري التحميل...",
     optionalLinkAndNotes = "رابط خارجي (اختياري)",
-    driveSyncTitle = "مزامنة Google Drive التلقائية",
-    driveSyncSubtitle = "أي ملف يتم رفعه على مجلد Drive المربوط يظهر تلقائياً هنا.",
-    linkDriveFolder = "ربط مجلد Drive",
-    driveFolderTitleLabel = "اسم المجلد",
-    driveFolderUrlLabel = "رابط مجلد Google Drive",
-    driveSharingNote = "تأكد أن مشاركة المجلد على Drive مضبوطة على «أي شخص لديه الرابط».",
+    driveSyncTitle = "مكتبة المقررات والملفات",
+    driveSyncSubtitle = "جميع الملفات والمحاضرات متاحة للمعاينة والتحميل مباشرة داخل التطبيق.",
+    linkDriveFolder = "إدارة مخزن الملفات",
+    driveFolderTitleLabel = "اسم المخزن / الفرقة",
+    driveFolderUrlLabel = "رابط مجلد التخزين السحابي (Drive)",
+    driveSharingNote = "مخصص للسوبر أدمن فقط: يتم سحب الملفات وعرضها للطلاب مباشرة داخل التطبيق دون إظهار رابط Drive.",
     refreshDrive = "تحديث",
-    noDriveFilesYet = "لا توجد ملفات ظاهرة في مجلدات Drive المربوطة حالياً.",
+    noDriveFilesYet = "لا توجد ملفات متاحة في هذا القسم حالياً.",
     accountStatusActive = "نشط",
     accountStatusDisabled = "موقوف",
     disableAccountAction = "إيقاف",
@@ -581,7 +591,12 @@ val ArabicStrings = UniCoreStrings(
     aiSourceAuto = "تلقائي من الملفات المرفوعة",
     aiSourceNone = "عام (بدون ملفات)",
     aiSourcesPickerTitle = "مصدر الشرح من الملفات",
-    aiSourcesUsedPrefix = "المصدر المرفوع"
+    aiSourcesUsedPrefix = "المصدر المرفوع",
+    manageStorageVault = "مخزن الملفات (سوبر أدمن)",
+    storageVaultSubtitle = "إدارة روابط التخزين السحابي. السوبر أدمن فقط يمكنه الإضافة أو التعديل أو الحذف.",
+    addStorageSource = "إضافة رابط مخزن",
+    editStorageSource = "تعديل رابط المخزن",
+    noStorageSourcesYet = "لا توجد مجلدات تخزين مربوطة حالياً."
 )
 
 fun stringsFor(language: AppLanguage): UniCoreStrings = when (language) {

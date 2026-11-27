@@ -599,11 +599,11 @@ class UniCoreGovernanceRepository(
                 action = "DRIVE_FOLDER_LINKED",
                 severity = AuditSeverity.INFO,
                 targetPath = docPath,
-                details = "Connected Google Drive folder '$cleanTitle'."
+                details = "Connected cloud storage folder '$cleanTitle'."
             )
             sendNotification(
                 title = cleanTitle,
-                body = "$addedByName connected a live Google Drive folder to Courses.",
+                body = "New study materials are now available in the Courses library ($cleanTitle).",
                 category = NotificationCategory.COURSE,
                 targetUid = "ALL"
             )
@@ -612,6 +612,71 @@ class UniCoreGovernanceRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateDriveFolder(
+        existingFolderId: String,
+        rawTitle: String,
+        rawUrl: String,
+        departmentId: String? = null,
+        departmentName: String? = null,
+        academicYear: String? = null
+    ): Result<Unit> {
+        val cleanOldId = when (val r = InputValidator.validateId(existingFolderId)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val cleanTitle = when (val r = InputValidator.validateBoundedText(rawTitle, "Folder title", 2, 100)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val (newFolderId, canonicalUrl) = when (val r = InputValidator.extractGoogleDriveFolder(rawUrl)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+
+        if (newFolderId != cleanOldId) {
+            val createRes = linkDriveFolder(cleanTitle, canonicalUrl, departmentId, departmentName, academicYear)
+            return if (createRes.isSuccess) {
+                unlinkDriveFolder(cleanOldId)
+            } else {
+                createRes
+            }
+        }
+
+        val docPath = "drive_folders/$cleanOldId"
+        return try {
+            requireUserId()
+            val updates = mutableMapOf<String, Any>(
+                "title" to cleanTitle,
+                "folderUrl" to canonicalUrl,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            updates["departmentId"] = departmentId?.takeIf { it.isNotBlank() } ?: FieldValue.delete()
+            updates["departmentName"] = departmentName
+                ?.takeIf { InputValidator.sanitizeText(it).length >= 2 }
+                ?.let { InputValidator.sanitizeText(it).take(80) }
+                ?: FieldValue.delete()
+            updates["academicYear"] = academicYear
+                ?.takeIf { InputValidator.sanitizeText(it).isNotBlank() }
+                ?.let { InputValidator.sanitizeText(it).take(40) }
+                ?: FieldValue.delete()
+
+            db.collection("drive_folders").document(cleanOldId).update(updates).await()
+
+            logAuditEvent(
+                action = "DRIVE_FOLDER_UPDATED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Super Admin updated storage folder '$cleanTitle'."
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
             Result.failure(e)
         }
     }
@@ -625,6 +690,12 @@ class UniCoreGovernanceRepository(
         return try {
             requireUserId()
             db.collection("drive_folders").document(cleanId).delete().await()
+            logAuditEvent(
+                action = "DRIVE_FOLDER_REMOVED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Super Admin removed storage folder."
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e

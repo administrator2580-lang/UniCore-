@@ -12,6 +12,7 @@ import {
   RefreshCw,
   School,
   Search,
+  Settings,
   Trash2,
   Upload,
   X
@@ -24,7 +25,8 @@ import {
   linkDriveFolder,
   saveDepartment,
   unlinkDriveFolder,
-  updateCourseDetails
+  updateCourseDetails,
+  updateDriveFolder
 } from '../data/firestoreService';
 import { triggerBrowserFileOpen } from '../data/vaultStorage';
 import { validateOptionalHttpsUrl } from '../security/validators';
@@ -45,17 +47,21 @@ export default function CoursesView({
   onShowToast
 }) {
   const canManage = userRole !== 'STUDENT';
+  const isSuperAdmin = userRole === 'SUPER_ADMIN';
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFilter, setSelectedFilter] = useState(null);
   const [selectedDepartmentId, setSelectedDepartmentId] = useState(null);
   const [selectedYear, setSelectedYear] = useState(null);
+  const [selectedLibrarySection, setSelectedLibrarySection] = useState(null);
   const [openingCourseId, setOpeningCourseId] = useState(null);
   const [openingDriveId, setOpeningDriveId] = useState(null);
   const [inAppPreview, setInAppPreview] = useState(null); // { title, url, mimeType, isIframe, revokeUrl }
 
   const [showCreateCourse, setShowCreateCourse] = useState(false);
   const [editingCourse, setEditingCourse] = useState(null);
+  const [showStorageManagerModal, setShowStorageManagerModal] = useState(false);
   const [showDriveModal, setShowDriveModal] = useState(false);
+  const [editingDriveFolder, setEditingDriveFolder] = useState(null);
   const [showDeptModal, setShowDeptModal] = useState(false);
   const [editingDept, setEditingDept] = useState(null);
 
@@ -84,18 +90,41 @@ export default function CoursesView({
   );
 
   const scopedDriveFiles = useMemo(() => {
-    if (!selectedDept && !selectedYear) return driveFiles;
+    const actualFiles = driveFiles.filter((file) => !file.isSubFolder);
+    if (!selectedDept && !selectedYear) return actualFiles;
     const allowedIds = new Set(visibleDriveFolders.map((f) => f.folderId));
-    return driveFiles.filter((file) => allowedIds.has(file.folderId));
+    return actualFiles.filter((file) => allowedIds.has(file.folderId));
   }, [driveFiles, visibleDriveFolders, selectedDept, selectedYear]);
+
+  const librarySections = useMemo(() => {
+    const set = new Set();
+    for (const file of scopedDriveFiles) {
+      const label = (file.subFolderPath || file.rootFolderTitle || file.folderTitle || '').trim();
+      if (label) set.add(label);
+    }
+    return Array.from(set);
+  }, [scopedDriveFiles]);
+
+  useEffect(() => {
+    if (selectedLibrarySection && !librarySections.includes(selectedLibrarySection)) {
+      setSelectedLibrarySection(null);
+    }
+  }, [librarySections, selectedLibrarySection]);
 
   const filteredDriveFiles = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return scopedDriveFiles;
-    return scopedDriveFiles.filter(
-      (f) => f.name.toLowerCase().includes(q) || f.folderTitle.toLowerCase().includes(q)
-    );
-  }, [scopedDriveFiles, searchQuery]);
+    return scopedDriveFiles.filter((f) => {
+      const sectionLabel = (f.subFolderPath || f.rootFolderTitle || f.folderTitle || '').trim();
+      const matchesSection = !selectedLibrarySection || sectionLabel === selectedLibrarySection;
+      const matchesQuery =
+        !q ||
+        (f.name || '').toLowerCase().includes(q) ||
+        (f.subFolderPath || '').toLowerCase().includes(q) ||
+        (f.rootFolderTitle || '').toLowerCase().includes(q) ||
+        (f.folderTitle || '').toLowerCase().includes(q);
+      return matchesSection && matchesQuery;
+    });
+  }, [scopedDriveFiles, selectedLibrarySection, searchQuery]);
 
   const filteredCourses = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -174,6 +203,15 @@ export default function CoursesView({
         }
         if (previewInsideApp && res?.base64) {
           showBase64InModal(res.fileName || item.name, res.base64, res.mimeType);
+        } else if (previewInsideApp && res?.textContent) {
+          const blobUrl = URL.createObjectURL(new Blob([res.textContent], { type: 'text/plain;charset=utf-8' }));
+          setInAppPreview({
+            title: res.fileName || item.name,
+            url: blobUrl,
+            mimeType: 'text/plain',
+            isIframe: true,
+            revokeUrl: blobUrl
+          });
         } else if (res?.openedInBrowser) {
           onShowToast(item.name);
         }
@@ -196,7 +234,7 @@ export default function CoursesView({
         a.remove();
       }
     } catch (err) {
-      onShowToast(err.message || 'Failed to open Google Drive file');
+      onShowToast(err.message || 'Failed to open study file');
     } finally {
       setOpeningDriveId(null);
     }
@@ -373,8 +411,8 @@ export default function CoursesView({
         ))}
       </div>
 
-      {/* Google Drive Live Sync Card */}
-      {(canManage || driveFolders.length > 0) ? (
+      {/* Study Files Library Card (Drive acts purely as hidden backend storage; only Super Admin manages links) */}
+      {(isSuperAdmin || isDriveRefreshing || filteredDriveFiles.length > 0) ? (
         <div className="m3-card accent-secondary">
           <div className="row-between" style={{ flexWrap: 'wrap' }}>
             <div className="row-gap">
@@ -398,113 +436,115 @@ export default function CoursesView({
                   <RefreshCw size={18} className={isDriveRefreshing ? 'spin' : ''} />
                 </button>
               ) : null}
-              {canManage ? (
+              {isSuperAdmin ? (
                 <button
                   type="button"
                   className="btn btn-tonal"
-                  onClick={() => setShowDriveModal(true)}
+                  onClick={() => setShowStorageManagerModal(true)}
                 >
-                  <Plus size={16} />
+                  <Settings size={16} />
                   <span>{strings.linkDriveFolder}</span>
                 </button>
               ) : null}
             </div>
           </div>
 
-          {visibleDriveFolders.length > 0 ? (
-            <>
-              <div className="chip-scroll">
-                {visibleDriveFolders.map((folder) => (
-                  <div
-                    key={folder.folderId}
-                    className="m3-chip"
-                    style={{ paddingInlineEnd: '6px', cursor: 'default' }}
-                  >
-                    <Folder size={15} style={{ color: 'var(--primary)' }} />
-                    <span>{folder.title}</span>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      style={{ width: '28px', height: '28px' }}
-                      onClick={() => openSafeExternalUrl(folder.folderUrl)}
-                      title={folder.title}
-                    >
-                      <ExternalLink size={14} />
-                    </button>
-                    {canManage ? (
-                      <button
-                        type="button"
-                        className="icon-btn"
-                        style={{ width: '28px', height: '28px', color: 'var(--error)' }}
-                        onClick={() => unlinkDriveFolder(folder.folderId).catch((e) => onShowToast(e.message))}
-                        title={strings.deleteLabel}
-                      >
-                        <X size={14} />
-                      </button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
+          {librarySections.length > 1 ? (
+            <div className="chip-scroll">
+              <button
+                type="button"
+                className={`m3-chip ${selectedLibrarySection === null ? 'selected' : ''}`}
+                onClick={() => setSelectedLibrarySection(null)}
+              >
+                {strings.allSections}
+              </button>
+              {librarySections.map((section) => (
+                <button
+                  key={section}
+                  type="button"
+                  className={`m3-chip ${selectedLibrarySection === section ? 'selected' : ''}`}
+                  onClick={() =>
+                    setSelectedLibrarySection(selectedLibrarySection === section ? null : section)
+                  }
+                >
+                  {section}
+                </button>
+              ))}
+            </div>
+          ) : null}
 
-              {filteredDriveFiles.length === 0 && !isDriveRefreshing ? (
-                <div className="muted">{strings.noDriveFilesYet}</div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {filteredDriveFiles.map((item) => (
-                    <div
-                      key={item.fileId}
-                      className="m3-subsurface"
-                      style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px', background: 'var(--surface)' }}
-                    >
-                      <div className="row-gap" style={{ minWidth: 0, flex: '1 1 200px' }}>
-                        {item.isSubFolder ? (
-                          <Folder size={18} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-                        ) : (
-                          <FileText size={18} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-                        )}
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {item.name}
-                          </div>
-                          <div className="muted" style={{ fontSize: '0.78rem' }}>
-                            {item.folderTitle}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="row-gap">
-                        {!item.isSubFolder ? (
-                          <button
-                            type="button"
-                            className="btn btn-tonal"
-                            disabled={openingDriveId === item.fileId}
-                            onClick={() => handleOpenDriveFile(item, true)}
-                          >
-                            <Eye size={15} />
-                            <span>{strings.previewInAppAction}</span>
-                          </button>
-                        ) : null}
-                        <button
-                          type="button"
-                          className="btn btn-outlined"
-                          disabled={openingDriveId === item.fileId}
-                          onClick={() => handleOpenDriveFile(item, false)}
+          {filteredDriveFiles.length === 0 && !isDriveRefreshing ? (
+            isSuperAdmin ? <div className="muted">{strings.noDriveFilesYet}</div> : null
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {filteredDriveFiles.map((item) => {
+                const subtitle = [item.subFolderPath, item.rootFolderTitle]
+                  .filter(Boolean)
+                  .join(' • ') || item.folderTitle;
+                return (
+                  <div
+                    key={item.fileId}
+                    className="m3-subsurface"
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: '8px',
+                      background: 'var(--surface)'
+                    }}
+                  >
+                    <div className="row-gap" style={{ minWidth: 0, flex: '1 1 200px' }}>
+                      <FileText size={18} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+                      <div style={{ minWidth: 0 }}>
+                        <div
+                          style={{
+                            fontWeight: 600,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap'
+                          }}
                         >
-                          {openingDriveId === item.fileId ? (
-                            <span className="spinner" />
-                          ) : (
-                            <>
-                              <Download size={15} />
-                              <span>{strings.downloadAndOpenFile}</span>
-                            </>
-                          )}
-                        </button>
+                          {item.name}
+                        </div>
+                        {subtitle ? (
+                          <div className="muted" style={{ fontSize: '0.78rem' }}>
+                            {subtitle}
+                          </div>
+                        ) : null}
                       </div>
                     </div>
-                  ))}
-                </div>
-              )}
-            </>
-          ) : null}
+                    <div className="row-gap">
+                      <button
+                        type="button"
+                        className="btn btn-tonal"
+                        disabled={openingDriveId === item.fileId}
+                        onClick={() => handleOpenDriveFile(item, true)}
+                      >
+                        <Eye size={15} />
+                        <span>{strings.previewInAppAction}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-outlined"
+                        disabled={openingDriveId === item.fileId}
+                        onClick={() => handleOpenDriveFile(item, false)}
+                      >
+                        {openingDriveId === item.fileId ? (
+                          <span className="spinner" />
+                        ) : (
+                          <>
+                            <Download size={15} />
+                            <span>{strings.downloadAndOpenFile}</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       ) : null}
 
@@ -639,17 +679,52 @@ export default function CoursesView({
         />
       ) : null}
 
-      {showDriveModal ? (
+      {showStorageManagerModal && isSuperAdmin ? (
+        <StorageVaultManagerModal
+          strings={strings}
+          folders={driveFolders}
+          onClose={() => setShowStorageManagerModal(false)}
+          onAddNew={() => {
+            setEditingDriveFolder(null);
+            setShowDriveModal(true);
+          }}
+          onEdit={(folder) => {
+            setEditingDriveFolder(folder);
+            setShowDriveModal(true);
+          }}
+          onDelete={async (folderId) => {
+            try {
+              await unlinkDriveFolder(db, folderId, auth);
+            } catch (err) {
+              onShowToast(err.message);
+            }
+          }}
+        />
+      ) : null}
+
+      {showDriveModal && isSuperAdmin ? (
         <LinkDriveModal
           strings={strings}
           departments={departments}
-          initialDeptId={selectedDept?.id || ''}
-          initialYear={selectedYear || ''}
-          onClose={() => setShowDriveModal(false)}
+          existing={editingDriveFolder}
+          initialDeptId={editingDriveFolder?.departmentId || selectedDept?.id || ''}
+          initialYear={editingDriveFolder?.academicYear || selectedYear || ''}
+          onClose={() => {
+            setShowDriveModal(false);
+            setEditingDriveFolder(null);
+          }}
           onSubmit={async (payload) => {
             try {
-              await linkDriveFolder(db, auth, payload);
+              if (editingDriveFolder) {
+                await updateDriveFolder(db, auth, {
+                  existingFolderId: editingDriveFolder.folderId,
+                  ...payload
+                });
+              } else {
+                await linkDriveFolder(db, auth, payload);
+              }
               setShowDriveModal(false);
+              setEditingDriveFolder(null);
             } catch (err) {
               onShowToast(err.message);
             }
@@ -998,9 +1073,90 @@ function EditCourseModal({ strings, course, departments, onClose, onSubmit }) {
   );
 }
 
-function LinkDriveModal({ strings, departments, initialDeptId, initialYear, onClose, onSubmit }) {
-  const [title, setTitle] = useState('');
-  const [folderUrl, setFolderUrl] = useState('');
+function StorageVaultManagerModal({ strings, folders, onClose, onAddNew, onEdit, onDelete }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="row-between">
+          <h3 style={{ margin: 0 }}>{strings.manageStorageVault}</h3>
+          <button type="button" className="icon-btn" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="muted" style={{ fontSize: '0.84rem' }}>
+          {strings.storageVaultSubtitle}
+        </div>
+
+        {folders.length === 0 ? (
+          <div className="muted" style={{ padding: '12px 0' }}>
+            {strings.noStorageSourcesYet}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '320px', overflowY: 'auto' }}>
+            {folders.map((folder) => {
+              const scopeLabel = [folder.departmentName, folder.academicYear].filter(Boolean).join(' • ');
+              return (
+                <div
+                  key={folder.folderId}
+                  className="m3-subsurface"
+                  style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}
+                >
+                  <div className="row-gap" style={{ minWidth: 0, flex: 1 }}>
+                    <Folder size={18} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {folder.title}
+                      </div>
+                      {scopeLabel ? (
+                        <div className="muted" style={{ fontSize: '0.78rem' }}>
+                          {scopeLabel}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="row-gap">
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      style={{ color: 'var(--primary)' }}
+                      onClick={() => onEdit(folder)}
+                      title={strings.editStorageSource}
+                    >
+                      <Pencil size={15} />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      style={{ color: 'var(--error)' }}
+                      onClick={() => onDelete(folder.folderId)}
+                      title={strings.deleteLabel}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="row-between" style={{ justifyContent: 'flex-end' }}>
+          <button type="button" className="btn btn-text" onClick={onClose}>
+            {strings.cancelAction}
+          </button>
+          <button type="button" className="btn btn-primary" onClick={onAddNew}>
+            <Plus size={16} />
+            <span>{strings.addStorageSource}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LinkDriveModal({ strings, departments, existing, initialDeptId, initialYear, onClose, onSubmit }) {
+  const [title, setTitle] = useState(existing?.title || '');
+  const [folderUrl, setFolderUrl] = useState(existing?.folderUrl || '');
   const [deptId, setDeptId] = useState(initialDeptId);
   const [year, setYear] = useState(initialYear);
   const chosenDept = departments.find((d) => d.id === deptId) || null;
@@ -1021,7 +1177,7 @@ function LinkDriveModal({ strings, departments, initialDeptId, initialYear, onCl
           });
         }}
       >
-        <h3 style={{ margin: 0 }}>{strings.linkDriveFolder}</h3>
+        <h3 style={{ margin: 0 }}>{existing ? strings.editStorageSource : strings.addStorageSource}</h3>
         <div className="muted" style={{ fontSize: '0.84rem' }}>
           {strings.driveSharingNote}
         </div>

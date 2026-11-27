@@ -47,12 +47,17 @@ class GoogleDriveSyncRepository(
         withContext(Dispatchers.IO) {
             if (folders.isEmpty()) return@withContext Result.success(emptyList())
             val collected = mutableListOf<DriveSyncedFile>()
+            val globalSeenFileIds = mutableSetOf<String>()
             var lastError: Throwable? = null
 
             for (folder in folders) {
                 try {
-                    val items = fetchFolderFiles(folder)
-                    collected.addAll(items)
+                    val items = fetchFolderFilesRecursively(folder)
+                    for (item in items) {
+                        if (!item.isSubFolder && globalSeenFileIds.add(item.fileId)) {
+                            collected.add(item)
+                        }
+                    }
                 } catch (e: Exception) {
                     lastError = e
                 }
@@ -65,25 +70,83 @@ class GoogleDriveSyncRepository(
             }
         }
 
-    private fun fetchFolderFiles(folder: DriveFolderLink): List<DriveSyncedFile> {
-        val url = "https://drive.google.com/embeddedfolderview?id=${folder.folderId}#list"
+    private fun fetchFolderFilesRecursively(rootFolder: DriveFolderLink): List<DriveSyncedFile> {
+        data class QueueNode(
+            val folderId: String,
+            val pathSegments: List<String>,
+            val depth: Int
+        )
+
+        val maxDepth = 3
+        val maxSubfoldersPerRoot = 30
+        val visitedFolderIds = mutableSetOf(rootFolder.folderId)
+        val queue = ArrayDeque<QueueNode>()
+        queue.add(QueueNode(rootFolder.folderId, emptyList(), 0))
+
+        val files = mutableListOf<DriveSyncedFile>()
+        var fetchedFolders = 0
+
+        while (queue.isNotEmpty() && fetchedFolders <= maxSubfoldersPerRoot) {
+            val current = queue.removeFirst()
+            val html = runCatching { fetchEmbeddedFolderHtml(current.folderId, rootFolder.title) }.getOrElse { err ->
+                if (current.depth == 0) throw err else ""
+            }
+            fetchedFolders++
+            if (html.isBlank()) continue
+
+            val currentSubPath = current.pathSegments.joinToString(" / ")
+            val scopedFolder = rootFolder.copy(
+                folderId = current.folderId,
+                title = if (currentSubPath.isNotBlank()) "${rootFolder.title} / $currentSubPath" else rootFolder.title
+            )
+            val entries = parseEmbeddedFolderHtml(html, scopedFolder)
+
+            for (entry in entries) {
+                if (entry.isSubFolder) {
+                    if (current.depth < maxDepth &&
+                        visitedFolderIds.size <= maxSubfoldersPerRoot &&
+                        visitedFolderIds.add(entry.fileId)
+                    ) {
+                        queue.add(
+                            QueueNode(
+                                folderId = entry.fileId,
+                                pathSegments = current.pathSegments + entry.name,
+                                depth = current.depth + 1
+                            )
+                        )
+                    }
+                } else {
+                    files.add(
+                        entry.copy(
+                            folderId = rootFolder.folderId,
+                            rootFolderTitle = rootFolder.title,
+                            subFolderPath = currentSubPath,
+                            folderTitle = if (currentSubPath.isNotBlank()) "${rootFolder.title} / $currentSubPath" else rootFolder.title
+                        )
+                    )
+                }
+            }
+        }
+
+        return files
+    }
+
+    private fun fetchEmbeddedFolderHtml(folderId: String, displayTitle: String): String {
+        val url = "https://drive.google.com/embeddedfolderview?id=$folderId#list"
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", BROWSER_UA)
             .get()
             .build()
 
-        val html = httpClient.newCall(request).execute().use { response ->
+        return httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 throw IllegalStateException(
-                    "Google Drive folder '${folder.title}' returned HTTP ${response.code}. Ensure sharing is set to 'Anyone with the link'."
+                    "Storage folder '$displayTitle' returned HTTP ${response.code}."
                 )
             }
             response.body?.string().orEmpty()
         }
-
-        if (html.isBlank()) return emptyList()
-        return parseEmbeddedFolderHtml(html, folder)
     }
 
     internal fun parseEmbeddedFolderHtml(html: String, folder: DriveFolderLink): List<DriveSyncedFile> {

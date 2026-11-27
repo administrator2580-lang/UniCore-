@@ -152,5 +152,59 @@ class ExampleUnitTest {
     )
     assertTrue(noMatch.isEmpty())
   }
+
+  @Test
+  fun parseEmbeddedFolderHtml_detectsSubfoldersAndStudyMatcherUsesSubFolderPath() {
+    val repo = GoogleDriveSyncRepository()
+    val root = DriveFolderLink(
+      id = "root1",
+      title = "NCT 1",
+      folderUrl = "https://drive.google.com/drive/folders/1ParentFolder123456",
+      folderId = "1ParentFolder123456"
+    )
+    val htmlWithSubfolder = """
+      <div class="flip-entries">
+        <div class="flip-entry" id="entry-1SubFolderCad12345">
+          <div class="flip-entry-info">
+            <a href="https://drive.google.com/drive/folders/1SubFolderCad12345?usp=drive_web">
+              <div class="flip-entry-list-icon"></div>
+              <div class="flip-entry-title">CAD</div>
+            </a>
+          </div>
+        </div>
+        <div class="flip-entry" id="entry-1RootFileLec12345">
+          <div class="flip-entry-info">
+            <a href="https://drive.google.com/file/d/1RootFileLec12345/view">
+              <div class="flip-entry-title">Electric Circuits Lec 1.pdf</div>
+            </a>
+          </div>
+        </div>
+      </div>
+    """.trimIndent()
+
+    val parsed = repo.parseEmbeddedFolderHtml(htmlWithSubfolder, root)
+    assertEquals(2, parsed.size)
+    assertTrue(parsed[0].isSubFolder)
+    assertEquals("CAD", parsed[0].name)
+    assertFalse(parsed[1].isSubFolder)
+    assertEquals("Electric Circuits Lec 1.pdf", parsed[1].name)
+
+    val nestedFile = DriveSyncedFile(
+      fileId = "1NestedCadPdf999",
+      folderId = "1ParentFolder123456",
+      folderTitle = "CAD",
+      rootFolderTitle = "NCT 1",
+      subFolderPath = "CAD",
+      name = "AutoCAD Sheet 1.pdf",
+      isSubFolder = false,
+      viewUrl = "https://drive.google.com/file/d/1NestedCadPdf999/view",
+      downloadUrl = "https://drive.usercontent.google.com/download?id=1NestedCadPdf999&export=download&confirm=t"
+    )
+    val candidates = StudyMaterialMatcher.buildCandidateList(emptyList(), listOf(nestedFile), emptyList())
+    assertEquals(1, candidates.size)
+    assertFalse(candidates.first().contextSubtitle.contains("Google Drive", ignoreCase = true))
+    assertTrue(candidates.first().contextSubtitle.contains("CAD"))
+    assertTrue(candidates.first().contextSubtitle.contains("NCT 1"))
+  }
 }
 

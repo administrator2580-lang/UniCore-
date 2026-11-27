@@ -735,8 +735,11 @@ test("12. Notifications RBAC: Admins send broadcasts/targeted alerts; Students r
   );
 });
 
-test("13. Course file chunks & Google Drive folders RBAC: Admin creates/deletes, Students read published only", async () => {
+test("13. Course file chunks & Drive storage folders RBAC: SuperAdmin manages storage folders, Regular Admin & Students cannot modify", async () => {
   await seedRolesAndBaseData();
+  const superDb = testEnv
+    .authenticatedContext(SUPER_ADMIN_UID, { email: BOOTSTRAP_EMAIL, email_verified: true })
+    .firestore();
   const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
   const aliceDb = testEnv.authenticatedContext(STUDENT_A).firestore();
 
@@ -780,23 +783,11 @@ test("13. Course file chunks & Google Drive folders RBAC: Admin creates/deletes,
     })
   );
 
-  // Admin CAN connect a Google Drive folder URL; non-drive URLs rejected
+  // Regular Admin CANNOT create drive_folders (Super Admin only)
   await assertFails(
     adminDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").set({
       folderId: "1AbCdEfGhIjKlMnOp",
-      title: "Bad Non-Drive Host",
-      folderUrl: "https://evil.example.com/folders/1AbCdEfGhIjKlMnOp",
-      addedBy: ADMIN_UID,
-      addedByName: "Dr. Carol",
-      createdAt: pastDate(),
-      updatedAt: pastDate(),
-    })
-  );
-
-  await assertSucceeds(
-    adminDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").set({
-      folderId: "1AbCdEfGhIjKlMnOp",
-      title: "CS Drive Folder",
+      title: "Admin Unauthorized Folder",
       folderUrl: "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp",
       addedBy: ADMIN_UID,
       addedByName: "Dr. Carol",
@@ -805,10 +796,60 @@ test("13. Course file chunks & Google Drive folders RBAC: Admin creates/deletes,
     })
   );
 
-  // Student CAN list drive_folders, CANNOT create or delete
+  // Non-drive URLs rejected even for Super Admin
+  await assertFails(
+    superDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").set({
+      folderId: "1AbCdEfGhIjKlMnOp",
+      title: "Bad Non-Drive Host",
+      folderUrl: "https://evil.example.com/folders/1AbCdEfGhIjKlMnOp",
+      addedBy: SUPER_ADMIN_UID,
+      addedByName: "Super Dave",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Super Admin CAN connect, update, and delete storage folder
+  await assertSucceeds(
+    superDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").set({
+      folderId: "1AbCdEfGhIjKlMnOp",
+      title: "NCT 1 Storage",
+      folderUrl: "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp",
+      addedBy: SUPER_ADMIN_UID,
+      addedByName: "Super Dave",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  await assertSucceeds(
+    superDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").update({
+      title: "NCT 1 Updated",
+      folderUrl: "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp?usp=sharing",
+      updatedAt: pastDate(100),
+    })
+  );
+
+  // Regular Admin CANNOT update or delete Super Admin's storage folder
+  await assertFails(
+    adminDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").update({
+      title: "Hijacked",
+      updatedAt: pastDate(50),
+    })
+  );
+  await assertFails(
+    adminDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").delete()
+  );
+
+  // Student CAN list drive_folders for transparent app sync, CANNOT create, update, or delete
   await assertSucceeds(aliceDb.collection("drive_folders").get());
   await assertFails(
     aliceDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").delete()
+  );
+
+  // Super Admin CAN delete storage folder
+  await assertSucceeds(
+    superDb.collection("drive_folders").doc("1AbCdEfGhIjKlMnOp").delete()
   );
 });
 

@@ -573,7 +573,7 @@ service cloud.firestore {
 
     match /drive_folders/{folderDocId} {
       allow get, list: if isSignedIn() && isActiveAccount();
-      allow create: if isAdmin() && isActiveAccount() &&
+      allow create: if isSuperAdmin() && isActiveAccount() &&
         isValidDriveFolderId(folderDocId) &&
         incoming().folderId == folderDocId &&
         incoming().addedBy == request.auth.uid &&
@@ -585,8 +585,17 @@ service cloud.firestore {
           'addedBy', 'addedByName', 'createdAt', 'updatedAt'
         ]) &&
         isValidDriveFolderLink(incoming());
-      allow update: if false;
-      allow delete: if isAdmin() && isActiveAccount() && isValidDriveFolderId(folderDocId);
+      allow update: if isSuperAdmin() && isActiveAccount() &&
+        isValidDriveFolderId(folderDocId) &&
+        isValidDriveFolderLink(incoming()) &&
+        incoming().folderId == existing().folderId &&
+        incoming().addedBy == existing().addedBy &&
+        incoming().addedByName == existing().addedByName &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'folderUrl', 'departmentId', 'departmentName', 'academicYear', 'updatedAt'
+        ]);
+      allow delete: if isSuperAdmin() && isActiveAccount() && isValidDriveFolderId(folderDocId);
     }
 
     // Academic Departments & Study Years: Writable ONLY by Admins & Super Admins; Active users read

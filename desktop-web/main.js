@@ -436,6 +436,71 @@ function parseEmbeddedFolderHtml(html, folder) {
   return results;
 }
 
+async function fetchFolderFilesRecursively(rootFolder, maxDepth = 3, maxSubfoldersPerRoot = 30) {
+  const rootTitle = String(rootFolder?.title || 'Study Library').trim() || 'Study Library';
+  const rootFolderId = String(rootFolder?.folderId || '');
+  if (!/^[a-zA-Z0-9_-]{10,128}$/.test(rootFolderId)) return [];
+
+  const visitedFolderIds = new Set();
+  const seenFileIds = new Set();
+  const collectedFiles = [];
+  const queue = [{ folderId: rootFolderId, title: rootTitle, pathPrefix: '', depth: 0 }];
+  let subfoldersProcessed = 0;
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!visitedFolderIds.add(current.folderId)) continue;
+
+    let html;
+    try {
+      html = await fetchHttpsText(`https://drive.google.com/embeddedfolderview?id=${current.folderId}#list`);
+    } catch (err) {
+      if (current.depth === 0) throw err;
+      continue;
+    }
+
+    const entries = parseEmbeddedFolderHtml(html, {
+      folderId: current.folderId,
+      title: current.title
+    });
+
+    for (const entry of entries) {
+      if (entry.isSubFolder) {
+        if (
+          current.depth < maxDepth &&
+          subfoldersProcessed < maxSubfoldersPerRoot &&
+          /^[a-zA-Z0-9_-]{10,128}$/.test(entry.fileId) &&
+          !visitedFolderIds.has(entry.fileId)
+        ) {
+          subfoldersProcessed += 1;
+          const nextPath = current.pathPrefix ? `${current.pathPrefix} / ${entry.name}` : entry.name;
+          queue.push({
+            folderId: entry.fileId,
+            title: entry.name,
+            pathPrefix: nextPath,
+            depth: current.depth + 1
+          });
+        }
+      } else {
+        const dedupeKey = `${rootFolderId}::${entry.fileId}`;
+        if (!seenFileIds.has(dedupeKey)) {
+          seenFileIds.add(dedupeKey);
+          collectedFiles.push({
+            ...entry,
+            folderId: rootFolderId,
+            rootFolderTitle: rootTitle,
+            subFolderPath: current.pathPrefix,
+            folderTitle: current.pathPrefix || rootTitle,
+            isSubFolder: false
+          });
+        }
+      }
+    }
+  }
+
+  return collectedFiles;
+}
+
 function registerIpcHandlers() {
   const getCacheDir = () => {
     const dir = path.resolve(app.getPath('userData'), 'course_cache');
@@ -522,8 +587,11 @@ function registerIpcHandlers() {
       const folderId = String(folder?.folderId || '');
       if (!/^[a-zA-Z0-9_-]{10,128}$/.test(folderId)) continue;
       try {
-        const html = await fetchHttpsText(`https://drive.google.com/embeddedfolderview?id=${folderId}#list`);
-        collected.push(...parseEmbeddedFolderHtml(html, { folderId, title: String(folder?.title || '') }));
+        const nestedFiles = await fetchFolderFilesRecursively({
+          folderId,
+          title: String(folder?.title || '')
+        });
+        collected.push(...nestedFiles);
       } catch (err) {
         lastError = err;
       }

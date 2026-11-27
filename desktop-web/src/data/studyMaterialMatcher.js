@@ -99,12 +99,15 @@ export function buildCandidateList(courses = [], driveFiles = [], vaultFiles = [
   }
   for (const file of driveFiles) {
     if (file.isSubFolder) continue;
+    const contextLabel = [file.subFolderPath, file.rootFolderTitle || file.folderTitle]
+      .filter(Boolean)
+      .join(' • ');
     list.push({
       kind: 'DRIVE',
       sourceId: `drive_${file.fileId}`,
       displayTitle: file.name || '',
       fileName: file.name || '',
-      contextSubtitle: `Google Drive • ${file.folderTitle || ''}`,
+      contextSubtitle: contextLabel,
       hasBinaryFile: true,
       raw: file
     });
@@ -295,7 +298,7 @@ export async function loadMatchedMaterialsForAi({ db, matchedCandidates }) {
         parts.push({
           sourceLabel: candidate.fileName,
           mimeType: 'text/plain',
-          courseSummary: `${candidate.contextSubtitle}\nDrive File: ${candidate.fileName}\nURL: ${file.viewUrl || ''}`
+          courseSummary: `${candidate.contextSubtitle}\nStudy Library File: ${candidate.fileName}`
         });
       }
     } else if (candidate.kind === 'VAULT') {

@@ -145,7 +145,9 @@ data class DriveSyncedFile(
     val isSubFolder: Boolean = false,
     val mimeHint: String = "application/octet-stream",
     val viewUrl: String,
-    val downloadUrl: String
+    val downloadUrl: String,
+    val subFolderPath: String = "",
+    val rootFolderTitle: String = folderTitle
 )
 
 @Keep

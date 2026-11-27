@@ -44,7 +44,10 @@ object StudyMaterialMatcher {
             override val sourceId: String = "drive_${file.fileId}"
             override val displayTitle: String = file.name
             override val fileName: String = file.name
-            override val contextSubtitle: String = "Google Drive • ${file.folderTitle}"
+            override val contextSubtitle: String = listOfNotNull(
+                file.subFolderPath.takeIf { it.isNotBlank() },
+                file.rootFolderTitle.takeIf { it.isNotBlank() } ?: file.folderTitle.takeIf { it.isNotBlank() }
+            ).distinct().joinToString(" • ")
             override val hasBinaryFile: Boolean = !file.isSubFolder
         }
 

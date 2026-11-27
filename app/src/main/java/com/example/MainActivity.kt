@@ -526,6 +526,7 @@ private fun UniCoreAuthenticatedShell(
                                 onSaveDepartment = viewModel::saveDepartment,
                                 onDeleteDepartment = viewModel::deleteDepartment,
                                 onLinkDriveFolder = viewModel::linkDriveFolder,
+                                onUpdateDriveFolder = viewModel::updateDriveFolder,
                                 onUnlinkDriveFolder = viewModel::unlinkDriveFolder,
                                 onRefreshDrive = viewModel::refreshDriveFilesNow,
                                 onOpenDriveFile = { item ->

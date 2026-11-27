@@ -531,32 +531,76 @@ class UniCoreViewModel(
         academicYear: String? = null
     ) {
         viewModelScope.launch {
-            if (_userRole.value == UserRole.STUDENT) {
+            if (_userRole.value != UserRole.SUPER_ADMIN) {
                 governance.logAuditEvent(
-                    "UNAUTHORIZED_ADMIN_ATTEMPT",
+                    "UNAUTHORIZED_SUPER_ADMIN_ATTEMPT",
                     AuditSeverity.HIGH,
                     "drive_folders",
-                    "Student attempted to link a Drive folder."
+                    "Non-SuperAdmin role attempted to connect storage folder."
                 )
-                _statusBanner.value = "Access denied: Admin privileges required."
+                _statusBanner.value = "Access denied: Only Super Admin can manage file storage links."
                 return@launch
             }
             if (!checkWriteQuota()) return@launch
             val res = governance.linkDriveFolder(title, rawUrl, departmentId, departmentName, academicYear)
             _statusBanner.value = res.fold(
-                onSuccess = { "Google Drive folder linked & auto-synced." },
-                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not link Drive folder.") }
+                onSuccess = { "Storage source connected & files synced." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not connect storage folder.") }
+            )
+        }
+    }
+
+    fun updateDriveFolder(
+        existingFolderId: String,
+        title: String,
+        rawUrl: String,
+        departmentId: String? = null,
+        departmentName: String? = null,
+        academicYear: String? = null
+    ) {
+        viewModelScope.launch {
+            if (_userRole.value != UserRole.SUPER_ADMIN) {
+                governance.logAuditEvent(
+                    "UNAUTHORIZED_SUPER_ADMIN_ATTEMPT",
+                    AuditSeverity.HIGH,
+                    "drive_folders/$existingFolderId",
+                    "Non-SuperAdmin role attempted to modify storage folder."
+                )
+                _statusBanner.value = "Access denied: Only Super Admin can edit file storage links."
+                return@launch
+            }
+            if (!checkWriteQuota()) return@launch
+            val res = governance.updateDriveFolder(
+                existingFolderId = existingFolderId,
+                rawTitle = title,
+                rawUrl = rawUrl,
+                departmentId = departmentId,
+                departmentName = departmentName,
+                academicYear = academicYear
+            )
+            _statusBanner.value = res.fold(
+                onSuccess = { "Storage source updated." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not update storage folder.") }
             )
         }
     }
 
     fun unlinkDriveFolder(folderId: String) {
         viewModelScope.launch {
-            if (_userRole.value == UserRole.STUDENT) return@launch
+            if (_userRole.value != UserRole.SUPER_ADMIN) {
+                governance.logAuditEvent(
+                    "UNAUTHORIZED_SUPER_ADMIN_ATTEMPT",
+                    AuditSeverity.HIGH,
+                    "drive_folders/$folderId",
+                    "Non-SuperAdmin role attempted to remove storage folder."
+                )
+                _statusBanner.value = "Access denied: Only Super Admin can remove file storage links."
+                return@launch
+            }
             val res = governance.unlinkDriveFolder(folderId)
             _statusBanner.value = res.fold(
-                onSuccess = { "Drive folder unlinked." },
-                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not remove folder.") }
+                onSuccess = { "Storage source removed." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not remove storage source.") }
             )
         }
     }

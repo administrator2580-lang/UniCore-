@@ -115,6 +115,7 @@ fun CoursesScreen(
     onSaveDepartment: (String?, String, List<String>) -> Unit,
     onDeleteDepartment: (String) -> Unit,
     onLinkDriveFolder: (String, String, String?, String?, String?) -> Unit,
+    onUpdateDriveFolder: (String, String, String, String?, String?, String?) -> Unit,
     onUnlinkDriveFolder: (String) -> Unit,
     onRefreshDrive: () -> Unit,
     onOpenDriveFile: (DriveSyncedFile) -> Unit
@@ -123,7 +124,9 @@ fun CoursesScreen(
     val strings = LocalAppStrings.current
     var showCreateDialog by remember { mutableStateOf(false) }
     var editingCourse by remember { mutableStateOf<Course?>(null) }
+    var showStorageManagerDialog by remember { mutableStateOf(false) }
     var showDriveDialog by remember { mutableStateOf(false) }
+    var editingDriveFolder by remember { mutableStateOf<DriveFolderLink?>(null) }
     var showDepartmentDialog by remember { mutableStateOf(false) }
     var editingDepartment by remember { mutableStateOf<AcademicDepartment?>(null) }
     var searchQuery by remember { mutableStateOf("") }
@@ -132,6 +135,7 @@ fun CoursesScreen(
     var selectedYear by remember { mutableStateOf<String?>(null) }
 
     val canManage = userRole != UserRole.STUDENT
+    val isSuperAdmin = userRole == UserRole.SUPER_ADMIN
     val departments = (departmentsState as? UiState.Success)?.data.orEmpty()
     val selectedDept = remember(departments, selectedDepartmentId) {
         departments.firstOrNull { it.id == selectedDepartmentId }
@@ -337,45 +341,41 @@ fun CoursesScreen(
             else -> emptyList()
         }
 
+        val allowedFolderIds = remember(visibleDriveFolders) {
+            visibleDriveFolders.map { it.folderId }.toSet()
+        }
+        val scopedDriveFilesState = when (driveFilesState) {
+            is UiState.Success -> {
+                val actualFiles = driveFilesState.data.filterNot { it.isSubFolder }
+                if (selectedDept == null && selectedYear == null) {
+                    UiState.Success(actualFiles)
+                } else {
+                    UiState.Success(actualFiles.filter { it.folderId in allowedFolderIds })
+                }
+            }
+            else -> driveFilesState
+        }
+        val hasVisibleLibraryFiles = (scopedDriveFilesState as? UiState.Success)?.data?.isNotEmpty() == true
+        val showLibraryCard = isSuperAdmin || isDriveRefreshing || hasVisibleLibraryFiles ||
+            (isSuperAdmin && driveFilesState is UiState.Error)
+
         LazyColumn(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxSize()
         ) {
-            // Google Drive Live Sync Card (Filtered by Department/Year when selected)
-            if (canManage || allDriveFolders.isNotEmpty()) {
-                item(key = "drive_sync_card") {
-                    val allowedFolderIds = remember(visibleDriveFolders) {
-                        visibleDriveFolders.map { it.folderId }.toSet()
-                    }
-                    val scopedDriveFilesState = when (driveFilesState) {
-                        is UiState.Success -> {
-                            if (selectedDept == null && selectedYear == null) {
-                                driveFilesState
-                            } else {
-                                UiState.Success(driveFilesState.data.filter { it.folderId in allowedFolderIds })
-                            }
-                        }
-                        else -> driveFilesState
-                    }
-                    DriveSyncSectionCard(
-                        folders = visibleDriveFolders,
+            if (showLibraryCard) {
+                item(key = "study_library_card") {
+                    StudyLibrarySectionCard(
+                        hasConfiguredFolders = allDriveFolders.isNotEmpty(),
                         driveFilesState = scopedDriveFilesState,
                         isRefreshing = isDriveRefreshing,
                         openingDriveFileId = openingDriveFileId,
-                        canManage = canManage,
+                        isSuperAdmin = isSuperAdmin,
                         searchQuery = searchQuery,
-                        onOpenLinkDialog = { showDriveDialog = true },
-                        onUnlinkFolder = onUnlinkDriveFolder,
+                        onOpenStorageManager = { showStorageManagerDialog = true },
                         onRefreshDrive = onRefreshDrive,
-                        onOpenDriveFile = onOpenDriveFile,
-                        onOpenFolderUrl = { url ->
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                            }.onFailure {
-                                Toast.makeText(context, "No browser app found.", Toast.LENGTH_SHORT).show()
-                            }
-                        }
+                        onOpenDriveFile = onOpenDriveFile
                     )
                 }
             }
@@ -462,15 +462,41 @@ fun CoursesScreen(
         )
     }
 
-    if (showDriveDialog) {
+    if (showStorageManagerDialog && isSuperAdmin) {
+        StorageVaultManagerDialog(
+            folders = allDriveFolders,
+            onDismiss = { showStorageManagerDialog = false },
+            onAddNew = {
+                editingDriveFolder = null
+                showDriveDialog = true
+            },
+            onEditFolder = { folder ->
+                editingDriveFolder = folder
+                showDriveDialog = true
+            },
+            onDeleteFolder = onUnlinkDriveFolder
+        )
+    }
+
+    if (showDriveDialog && isSuperAdmin) {
+        val currentEdit = editingDriveFolder
         LinkDriveFolderDialog(
             departments = departments,
-            initialDepartmentId = selectedDept?.id,
-            initialYear = selectedYear,
-            onDismiss = { showDriveDialog = false },
-            onConfirm = { title, url, deptId, deptName, year ->
-                onLinkDriveFolder(title, url, deptId, deptName, year)
+            existing = currentEdit,
+            initialDepartmentId = currentEdit?.departmentId ?: selectedDept?.id,
+            initialYear = currentEdit?.academicYear ?: selectedYear,
+            onDismiss = {
                 showDriveDialog = false
+                editingDriveFolder = null
+            },
+            onConfirm = { title, url, deptId, deptName, year ->
+                if (currentEdit == null) {
+                    onLinkDriveFolder(title, url, deptId, deptName, year)
+                } else {
+                    onUpdateDriveFolder(currentEdit.folderId, title, url, deptId, deptName, year)
+                }
+                showDriveDialog = false
+                editingDriveFolder = null
             }
         )
     }
@@ -503,20 +529,20 @@ fun CoursesScreen(
 }
 
 @Composable
-private fun DriveSyncSectionCard(
-    folders: List<DriveFolderLink>,
+private fun StudyLibrarySectionCard(
+    hasConfiguredFolders: Boolean,
     driveFilesState: UiState<List<DriveSyncedFile>>,
     isRefreshing: Boolean,
     openingDriveFileId: String?,
-    canManage: Boolean,
+    isSuperAdmin: Boolean,
     searchQuery: String,
-    onOpenLinkDialog: () -> Unit,
-    onUnlinkFolder: (String) -> Unit,
+    onOpenStorageManager: () -> Unit,
     onRefreshDrive: () -> Unit,
-    onOpenDriveFile: (DriveSyncedFile) -> Unit,
-    onOpenFolderUrl: (String) -> Unit
+    onOpenDriveFile: (DriveSyncedFile) -> Unit
 ) {
     val strings = LocalAppStrings.current
+    var selectedSection by remember { mutableStateOf<String?>(null) }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)),
@@ -537,7 +563,7 @@ private fun DriveSyncSectionCard(
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(
-                        Icons.Default.CloudQueue,
+                        Icons.Default.Folder,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary
                     )
@@ -555,7 +581,7 @@ private fun DriveSyncSectionCard(
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (folders.isNotEmpty()) {
+                    if (hasConfiguredFolders) {
                         IconButton(onClick = onRefreshDrive, enabled = !isRefreshing) {
                             if (isRefreshing) {
                                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
@@ -564,12 +590,12 @@ private fun DriveSyncSectionCard(
                             }
                         }
                     }
-                    if (canManage) {
+                    if (isSuperAdmin) {
                         FilledTonalButton(
-                            onClick = onOpenLinkDialog,
-                            modifier = Modifier.testTag("link_drive_folder_button")
+                            onClick = onOpenStorageManager,
+                            modifier = Modifier.testTag("manage_storage_vault_button")
                         ) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.CloudQueue, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.size(4.dp))
                             Text(strings.linkDriveFolder, maxLines = 1)
                         }
@@ -577,140 +603,136 @@ private fun DriveSyncSectionCard(
                 }
             }
 
-            if (folders.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    folders.forEach { folder ->
-                        Surface(
-                            color = MaterialTheme.colorScheme.surface,
-                            shape = MaterialTheme.shapes.small,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Folder,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = folder.title,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                IconButton(
-                                    onClick = { onOpenFolderUrl(folder.folderUrl) },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(
-                                        Icons.AutoMirrored.Filled.OpenInNew,
-                                        contentDescription = folder.title,
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                }
-                                if (canManage) {
-                                    IconButton(
-                                        onClick = { onUnlinkFolder(folder.folderId) },
-                                        modifier = Modifier.size(28.dp)
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Close,
-                                            contentDescription = strings.deleteLabel,
-                                            tint = MaterialTheme.colorScheme.error,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                when (driveFilesState) {
-                    is UiState.Loading -> CircularProgressIndicator(modifier = Modifier.size(22.dp))
-                    is UiState.Error -> {
+            when (driveFilesState) {
+                is UiState.Loading -> CircularProgressIndicator(modifier = Modifier.size(22.dp))
+                is UiState.Error -> {
+                    if (isSuperAdmin) {
                         Text(
                             text = driveFilesState.message,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )
                     }
-                    is UiState.Success -> {
-                        val filteredFiles = remember(driveFilesState.data, searchQuery) {
-                            if (searchQuery.isBlank()) driveFilesState.data
-                            else driveFilesState.data.filter {
-                                it.name.contains(searchQuery.trim(), ignoreCase = true) ||
-                                    it.folderTitle.contains(searchQuery.trim(), ignoreCase = true)
+                }
+                is UiState.Success -> {
+                    val sections = remember(driveFilesState.data) {
+                        driveFilesState.data
+                            .map { it.subFolderPath.ifBlank { it.rootFolderTitle.ifBlank { it.folderTitle } } }
+                            .filter { it.isNotBlank() }
+                            .distinct()
+                    }
+                    LaunchedEffect(sections) {
+                        if (selectedSection != null && selectedSection !in sections) {
+                            selectedSection = null
+                        }
+                    }
+
+                    if (sections.size > 1) {
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilterChip(
+                                selected = selectedSection == null,
+                                onClick = { selectedSection = null },
+                                label = { Text(strings.allTypes) }
+                            )
+                            sections.forEach { section ->
+                                FilterChip(
+                                    selected = selectedSection == section,
+                                    onClick = {
+                                        selectedSection = if (selectedSection == section) null else section
+                                    },
+                                    label = { Text(section) }
+                                )
                             }
                         }
-                        if (filteredFiles.isEmpty() && !isRefreshing) {
-                            Text(
-                                text = strings.noDriveFilesYet,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        } else {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                filteredFiles.forEach { fileItem ->
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.surface,
-                                        shape = MaterialTheme.shapes.small,
-                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                                        modifier = Modifier.fillMaxWidth()
+                    }
+
+                    val filteredFiles = remember(driveFilesState.data, searchQuery, selectedSection) {
+                        driveFilesState.data.filter { fileItem ->
+                            val itemSection = fileItem.subFolderPath.ifBlank {
+                                fileItem.rootFolderTitle.ifBlank { fileItem.folderTitle }
+                            }
+                            val matchesSection = selectedSection == null || itemSection == selectedSection
+                            val q = searchQuery.trim()
+                            val matchesQuery = q.isBlank() ||
+                                fileItem.name.contains(q, ignoreCase = true) ||
+                                itemSection.contains(q, ignoreCase = true)
+                            matchesSection && matchesQuery
+                        }
+                    }
+
+                    if (filteredFiles.isEmpty() && !isRefreshing) {
+                        Text(
+                            text = strings.noDriveFilesYet,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            filteredFiles.forEach { fileItem ->
+                                val itemSection = fileItem.subFolderPath.ifBlank {
+                                    fileItem.rootFolderTitle.ifBlank { fileItem.folderTitle }
+                                }
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surface,
+                                    shape = MaterialTheme.shapes.small,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            modifier = Modifier.weight(1f)
                                         ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                modifier = Modifier.weight(1f)
-                                            ) {
-                                                Icon(
-                                                    imageVector = if (fileItem.isSubFolder) Icons.Default.Folder else Icons.Default.Description,
-                                                    contentDescription = null,
-                                                    tint = MaterialTheme.colorScheme.primary,
-                                                    modifier = Modifier.size(20.dp)
+                                            Icon(
+                                                imageVector = if (fileItem.mimeHint.startsWith("image/")) {
+                                                    Icons.Default.Image
+                                                } else {
+                                                    Icons.Default.Description
+                                                },
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Column {
+                                                Text(
+                                                    text = fileItem.name,
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis
                                                 )
-                                                Column {
+                                                if (itemSection.isNotBlank()) {
                                                     Text(
-                                                        text = fileItem.name,
-                                                        style = MaterialTheme.typography.titleSmall,
-                                                        maxLines = 2,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                    Text(
-                                                        text = fileItem.folderTitle,
+                                                        text = itemSection,
                                                         style = MaterialTheme.typography.labelSmall,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        color = MaterialTheme.colorScheme.primary
                                                     )
                                                 }
                                             }
-                                            OutlinedButton(
-                                                onClick = { onOpenDriveFile(fileItem) },
-                                                enabled = openingDriveFileId != fileItem.fileId
-                                            ) {
-                                                if (openingDriveFileId == fileItem.fileId) {
-                                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                                } else {
-                                                    Icon(
-                                                        Icons.Default.Download,
-                                                        contentDescription = strings.downloadAndOpenFile,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                    Spacer(Modifier.size(4.dp))
-                                                    Text(strings.downloadAndOpenFile, maxLines = 1)
-                                                }
+                                        }
+                                        OutlinedButton(
+                                            onClick = { onOpenDriveFile(fileItem) },
+                                            enabled = openingDriveFileId != fileItem.fileId
+                                        ) {
+                                            if (openingDriveFileId == fileItem.fileId) {
+                                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                            } else {
+                                                Icon(
+                                                    Icons.Default.Download,
+                                                    contentDescription = strings.downloadAndOpenFile,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(Modifier.size(4.dp))
+                                                Text(strings.downloadAndOpenFile, maxLines = 1)
                                             }
                                         }
                                     }
@@ -722,6 +744,117 @@ private fun DriveSyncSectionCard(
             }
         }
     }
+}
+
+@Composable
+private fun StorageVaultManagerDialog(
+    folders: List<DriveFolderLink>,
+    onDismiss: () -> Unit,
+    onAddNew: () -> Unit,
+    onEditFolder: (DriveFolderLink) -> Unit,
+    onDeleteFolder: (String) -> Unit
+) {
+    val strings = LocalAppStrings.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(strings.manageStorageVault) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = strings.storageVaultSubtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Button(
+                    onClick = onAddNew,
+                    modifier = Modifier.fillMaxWidth().testTag("add_storage_source_button")
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.size(6.dp))
+                    Text(strings.addStorageSource)
+                }
+
+                if (folders.isEmpty()) {
+                    Text(
+                        text = strings.noStorageSourcesYet,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    folders.forEach { folder ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            shape = MaterialTheme.shapes.small,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = folder.title,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    val meta = listOfNotNull(folder.departmentName, folder.academicYear)
+                                        .joinToString(" • ")
+                                    if (meta.isNotBlank()) {
+                                        Text(
+                                            text = meta,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    Text(
+                                        text = folder.folderUrl,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Row {
+                                    IconButton(
+                                        onClick = { onEditFolder(folder) },
+                                        modifier = Modifier.testTag("edit_storage_${folder.folderId}")
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Edit,
+                                            contentDescription = strings.editStorageSource,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onDeleteFolder(folder.folderId) },
+                                        modifier = Modifier.testTag("delete_storage_${folder.folderId}")
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Delete,
+                                            contentDescription = strings.deleteLabel,
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(strings.cancelAction) }
+        }
+    )
 }
 
 @Composable
@@ -1200,21 +1333,22 @@ private fun EditCourseDialog(
 @Composable
 private fun LinkDriveFolderDialog(
     departments: List<AcademicDepartment>,
+    existing: DriveFolderLink? = null,
     initialDepartmentId: String?,
     initialYear: String?,
     onDismiss: () -> Unit,
     onConfirm: (String, String, String?, String?, String?) -> Unit
 ) {
     val strings = LocalAppStrings.current
-    var folderTitle by remember { mutableStateOf("") }
-    var folderUrl by remember { mutableStateOf("") }
-    var chosenDeptId by remember { mutableStateOf(initialDepartmentId) }
-    var chosenYear by remember { mutableStateOf(initialYear) }
+    var folderTitle by remember(existing?.folderId) { mutableStateOf(existing?.title.orEmpty()) }
+    var folderUrl by remember(existing?.folderId) { mutableStateOf(existing?.folderUrl.orEmpty()) }
+    var chosenDeptId by remember(existing?.folderId) { mutableStateOf(initialDepartmentId) }
+    var chosenYear by remember(existing?.folderId) { mutableStateOf(initialYear) }
     val chosenDept = departments.firstOrNull { it.id == chosenDeptId }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(strings.linkDriveFolder) },
+        title = { Text(if (existing == null) strings.addStorageSource else strings.editStorageSource) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),

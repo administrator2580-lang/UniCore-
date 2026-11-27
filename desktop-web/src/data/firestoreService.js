@@ -703,7 +703,7 @@ export async function linkDriveFolder(db, auth, { title, folderUrl, departmentId
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Not authenticated.');
   assertCleanText(title);
-  const tRes = validateBoundedText(title, 'Folder title', 2, 100);
+  const tRes = validateBoundedText(title, 'Storage source title', 2, 100);
   if (!tRes.valid) throw new Error(tRes.reason);
   const dRes = extractGoogleDriveFolder(folderUrl);
   if (!dRes.valid) throw new Error(dRes.reason);
@@ -735,18 +735,97 @@ export async function linkDriveFolder(db, auth, { title, folderUrl, departmentId
     'DRIVE_FOLDER_LINKED',
     'INFO',
     `drive_folders/${dRes.folderId}`,
-    `Connected Google Drive folder '${tRes.value}'.`
+    `Configured study files storage source '${tRes.value}'.`
   );
   await sendNotification(db, auth, {
     title: tRes.value,
-    body: `${addedByName} connected a live Google Drive folder to Courses.`,
+    body: `${addedByName} added new study materials to ${tRes.value}.`,
     category: 'COURSE',
     targetUid: 'ALL'
   });
 }
 
-export async function unlinkDriveFolder(db, folderId) {
+export async function updateDriveFolder(
+  db,
+  auth,
+  { existingFolderId, title, folderUrl, departmentId, departmentName, academicYear }
+) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(title);
+  const tRes = validateBoundedText(title, 'Storage source title', 2, 100);
+  if (!tRes.valid) throw new Error(tRes.reason);
+  const dRes = extractGoogleDriveFolder(folderUrl);
+  if (!dRes.valid) throw new Error(dRes.reason);
+
+  if (dRes.folderId === existingFolderId) {
+    const updates = {
+      title: tRes.value,
+      folderUrl: dRes.canonicalUrl,
+      departmentId: departmentId && isValidId(departmentId) ? departmentId : deleteField(),
+      departmentName:
+        departmentName && sanitizeText(departmentName).length >= 2
+          ? sanitizeText(departmentName).slice(0, 80)
+          : deleteField(),
+      academicYear:
+        academicYear && sanitizeText(academicYear) ? sanitizeText(academicYear).slice(0, 40) : deleteField(),
+      updatedAt: serverTimestamp()
+    };
+    await updateDoc(doc(db, 'drive_folders', existingFolderId), updates);
+    await logAuditEvent(
+      db,
+      auth,
+      'DRIVE_FOLDER_LINKED',
+      'INFO',
+      `drive_folders/${existingFolderId}`,
+      `Super Admin updated storage source '${tRes.value}'.`
+    );
+  } else {
+    let addedByName = sanitizeText(auth.currentUser?.displayName || 'Super Admin').slice(0, 60);
+    if (addedByName.length < 2) addedByName = 'Super Admin';
+    const payload = {
+      folderId: dRes.folderId,
+      title: tRes.value,
+      folderUrl: dRes.canonicalUrl,
+      addedBy: uid,
+      addedByName,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    };
+    if (departmentId && isValidId(departmentId)) payload.departmentId = departmentId;
+    if (departmentName && sanitizeText(departmentName).length >= 2) {
+      payload.departmentName = sanitizeText(departmentName).slice(0, 80);
+    }
+    if (academicYear && sanitizeText(academicYear)) {
+      payload.academicYear = sanitizeText(academicYear).slice(0, 40);
+    }
+    await setDoc(doc(db, 'drive_folders', dRes.folderId), payload);
+    if (existingFolderId) {
+      await deleteDoc(doc(db, 'drive_folders', existingFolderId)).catch(() => {});
+    }
+    await logAuditEvent(
+      db,
+      auth,
+      'DRIVE_FOLDER_LINKED',
+      'INFO',
+      `drive_folders/${dRes.folderId}`,
+      `Super Admin replaced storage source '${existingFolderId}' with '${tRes.value}'.`
+    );
+  }
+}
+
+export async function unlinkDriveFolder(db, folderId, auth = null) {
   await deleteDoc(doc(db, 'drive_folders', folderId));
+  if (auth) {
+    await logAuditEvent(
+      db,
+      auth,
+      'DRIVE_FOLDER_LINKED',
+      'INFO',
+      `drive_folders/${folderId}`,
+      `Super Admin removed storage source ${folderId}.`
+    );
+  }
 }
 
 // --- Quizzes ---
