@@ -495,6 +495,9 @@ function AuthenticatedShell({
                 clients={clients}
                 userProfile={userProfile}
                 systemSettings={systemSettings}
+                courses={courses}
+                driveFiles={driveFiles}
+                vaultFiles={files}
                 onShowToast={onShowToast}
               />
             ) : null}

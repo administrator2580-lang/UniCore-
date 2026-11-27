@@ -287,6 +287,7 @@ private fun UniCoreAuthenticatedShell(
     val roleInvitesState by viewModel.roleInvitesState.collectAsStateWithLifecycle()
     val auditLogsState by viewModel.auditLogsState.collectAsStateWithLifecycle()
     val aiUiState by viewModel.aiUiState.collectAsStateWithLifecycle()
+    val availableAiSources by viewModel.availableAiSources.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val inAppPreviewFile by viewModel.inAppPreviewFile.collectAsStateWithLifecycle()
     val selectedChatRoomId by viewModel.selectedChatRoomId.collectAsStateWithLifecycle()
@@ -580,7 +581,10 @@ private fun UniCoreAuthenticatedShell(
                             UniCoreTab.AI_TUTOR -> AiTutorScreen(
                                 aiState = aiUiState,
                                 quotaSnapshot = quotaSnapshot,
-                                onAskTutor = { prompt -> viewModel.askAiTutor(prompt, prefs.language) },
+                                availableSources = availableAiSources,
+                                onAskTutor = { prompt, sourceId ->
+                                    viewModel.askAiTutor(context, prompt, prefs.language, sourceId)
+                                },
                                 onCancelTutor = viewModel::cancelAiTutor,
                                 onClearTutor = viewModel::clearAiState
                             )

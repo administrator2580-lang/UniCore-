@@ -5,6 +5,7 @@ import com.example.data.preferences.AppLanguage
 import com.google.firebase.Firebase
 import com.google.firebase.ai.GenerativeModel
 import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.Content
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
@@ -16,16 +17,26 @@ import kotlinx.coroutines.withTimeout
 
 /**
  * Zero-Cost AI Tutor powered by Firebase AI Logic.
- * Uses ultra-fast gemini-3.5-flash-lite primarily (minimizing latency on mobile),
- * with automatic fallback to gemini-3.8-flash and unary generation if streaming stalls.
- * Also converts raw LaTeX/Markdown clutter into clean, human-readable Unicode math & Arabic formatting.
+ * Grounded on uploaded Course files, synced Google Drive PDFs/docs, and Vault materials
+ * via multimodal inlineData + extracted text context.
  */
 class AiTutorRepository {
+
+    data class AiMaterialPart(
+        val sourceLabel: String,
+        val mimeType: String,
+        val inlineBytes: ByteArray? = null,
+        val extractedText: String? = null,
+        val courseSummary: String? = null
+    )
 
     private val systemPrompt = content {
         text(
             "You are UniCore Academic Tutor. Give clear, concise, practical study answers " +
                 "in the user's language (Arabic if prompted in Arabic or requested). " +
+                "When uploaded course files (PDFs, images, or notes) are attached, ALWAYS treat those " +
+                "attached files as the primary authoritative textbook/source and extract the explanation " +
+                "directly from their contents. " +
                 "CRITICAL FORMATTING RULE: Never output raw LaTeX, TeX dollar signs ($ or $$), " +
                 "backslashes (such as \\Omega, \\frac, \\text, \\times), or raw Markdown clutter (### or **). " +
                 "Always write math expressions using clear Unicode symbols (Ω, ×, ÷, =, √, ², ³, °) " +
@@ -34,8 +45,8 @@ class AiTutorRepository {
     }
 
     private val fastConfig = generationConfig {
-        temperature = 0.4f
-        maxOutputTokens = 1024
+        temperature = 0.35f
+        maxOutputTokens = 2560
     }
 
     private val fastModel: GenerativeModel by lazy {
@@ -56,28 +67,38 @@ class AiTutorRepository {
 
     fun streamStudyAnswer(
         prompt: String,
-        preferredLanguage: AppLanguage = AppLanguage.ENGLISH
+        preferredLanguage: AppLanguage = AppLanguage.ENGLISH,
+        materials: List<AiMaterialPart> = emptyList(),
+        availableCatalogSummary: String = ""
     ): Flow<String> = flow {
-        val localizedPrompt = when (preferredLanguage) {
-            AppLanguage.ARABIC ->
-                "أجب باللغة العربية الواضحة وبأسلوب تعليمي مختصر ومنظم بدون استخدام رموز LaTeX أو علامات \$ أو *** أو ### (استخدم الرموز المباشرة مثل Ω و × و = فقط):\n$prompt"
-            AppLanguage.ENGLISH ->
-                "Answer clearly without raw LaTeX (\$ or \$\$) or Markdown hashes (### or **). Use clean Unicode symbols (Ω, ×, ÷, √, ², =):\n$prompt"
-        }
+        val requestContent = buildMultimodalContent(
+            prompt = prompt,
+            preferredLanguage = preferredLanguage,
+            materials = materials,
+            availableCatalogSummary = availableCatalogSummary
+        )
+        val hasBinaryAttachment = materials.any { it.inlineBytes != null && it.inlineBytes.isNotEmpty() }
+        val primaryTimeoutMs = if (hasBinaryAttachment) 55_000L else 30_000L
+        val fallbackTimeoutMs = if (hasBinaryAttachment) 60_000L else 35_000L
 
-        // Attempt 1: Fast Gemini 3.5 Flash-Lite stream (25s timeout)
-        val fastSuccess = runStreamOrFallback(fastModel, "gemini-3.5-flash-lite", localizedPrompt) { chunk ->
+        // Attempt 1: Fast Gemini 3.5 Flash-Lite stream
+        val fastSuccess = runStreamOrFallback(
+            model = fastModel,
+            modelName = "gemini-3.5-flash-lite",
+            requestContent = requestContent,
+            timeoutMs = primaryTimeoutMs
+        ) { chunk ->
             emit(formatReadableTutorOutput(chunk))
         }
         if (fastSuccess != null) {
             return@flow
         }
 
-        // Attempt 2: Balanced Gemini 3.8 Flash fallback (30s timeout)
+        // Attempt 2: Balanced Gemini 3.8 Flash fallback
         val balancedText = try {
-            withTimeout(30_000L) {
+            withTimeout(fallbackTimeoutMs) {
                 val accumulated = StringBuilder()
-                balancedModel.generateContentStream(localizedPrompt).collect { chunk ->
+                balancedModel.generateContentStream(requestContent).collect { chunk ->
                     val piece = chunk.text.orEmpty()
                     if (piece.isNotEmpty()) {
                         accumulated.append(piece)
@@ -85,7 +106,7 @@ class AiTutorRepository {
                     }
                 }
                 if (accumulated.isBlank()) {
-                    balancedModel.generateContent(localizedPrompt).text.orEmpty().also { text ->
+                    balancedModel.generateContent(requestContent).text.orEmpty().also { text ->
                         if (text.isNotBlank()) emit(formatReadableTutorOutput(text))
                     }
                 } else {
@@ -100,16 +121,82 @@ class AiTutorRepository {
         }
     }.flowOn(Dispatchers.IO)
 
+    private fun buildMultimodalContent(
+        prompt: String,
+        preferredLanguage: AppLanguage,
+        materials: List<AiMaterialPart>,
+        availableCatalogSummary: String
+    ): Content = content {
+        val promptBuilder = StringBuilder()
+
+        if (materials.isNotEmpty()) {
+            if (preferredLanguage == AppLanguage.ARABIC) {
+                promptBuilder.append(
+                    "اعتمد أولاً وبشكل أساسي على الملفات والمواد الدراسية المرفقة أدناه لاستخراج الشرح والتعريفات والأمثلة المطلوبة مباشرة من محتواها، واذكر اسم المصدر في إجابتك. إذا لم تجد الجزئية داخل الملف وضّح ذلك بوضوح.\n\n"
+                )
+            } else {
+                promptBuilder.append(
+                    "Base your explanation primarily on the uploaded course materials attached below. Extract definitions, laws, and examples directly from these files and cite the source file name. If the topic is not covered inside the file, say so clearly.\n\n"
+                )
+            }
+
+            materials.forEach { part ->
+                val bytes = part.inlineBytes
+                if (bytes != null && bytes.isNotEmpty()) {
+                    inlineData(bytes = bytes, mimeType = part.mimeType)
+                    promptBuilder.append("[Attached File: ${part.sourceLabel}]\n")
+                }
+                if (!part.extractedText.isNullOrBlank()) {
+                    promptBuilder.append(
+                        "<uploaded_file_text name=\"${part.sourceLabel}\">\n${part.extractedText}\n</uploaded_file_text>\n\n"
+                    )
+                }
+                if (!part.courseSummary.isNullOrBlank()) {
+                    promptBuilder.append(
+                        "<course_info name=\"${part.sourceLabel}\">\n${part.courseSummary}\n</course_info>\n\n"
+                    )
+                }
+            }
+        } else if (availableCatalogSummary.isNotBlank()) {
+            promptBuilder.append(
+                "<available_uploaded_library>\n$availableCatalogSummary\n</available_uploaded_library>\n"
+            )
+            if (preferredLanguage == AppLanguage.ARABIC) {
+                promptBuilder.append(
+                    "(لم يطابق السؤال ملفاً محدداً بالاسم؛ إذا طلب الطالب مادة من القائمة أعلاه أرشده لاختيار الملف من القائمة، وأجب على سؤاله الدراسي بشكل عام ومنظم).\n\n"
+                )
+            } else {
+                promptBuilder.append(
+                    "(No exact file name matched the query. Answer helpfully and remind the student they can select a specific file above if needed.)\n\n"
+                )
+            }
+        }
+
+        if (preferredLanguage == AppLanguage.ARABIC) {
+            promptBuilder.append(
+                "أجب باللغة العربية الواضحة وبأسلوب تعليمي منظم بدون استخدام رموز LaTeX أو علامات \$ أو ** أو ### (استخدم الرموز المباشرة مثل Ω و × و = و √ فقط):\n"
+            )
+        } else {
+            promptBuilder.append(
+                "Answer clearly without raw LaTeX (\$ or \$\$) or Markdown hashes (### or **). Use clean Unicode symbols (Ω, ×, ÷, √, ², =):\n"
+            )
+        }
+        promptBuilder.append(prompt)
+
+        text(promptBuilder.toString())
+    }
+
     private suspend fun runStreamOrFallback(
         model: GenerativeModel,
         modelName: String,
-        prompt: String,
+        requestContent: Content,
+        timeoutMs: Long,
         onPartial: suspend (String) -> Unit
     ): String? {
         return try {
-            withTimeout(25_000L) {
+            withTimeout(timeoutMs) {
                 val accumulated = StringBuilder()
-                model.generateContentStream(prompt).collect { chunk ->
+                model.generateContentStream(requestContent).collect { chunk ->
                     val piece = chunk.text.orEmpty()
                     if (piece.isNotEmpty()) {
                         accumulated.append(piece)
@@ -119,7 +206,7 @@ class AiTutorRepository {
                 if (accumulated.isNotBlank()) {
                     accumulated.toString()
                 } else {
-                    val unary = model.generateContent(prompt).text.orEmpty()
+                    val unary = model.generateContent(requestContent).text.orEmpty()
                     if (unary.isNotBlank()) {
                         onPartial(unary)
                         unary

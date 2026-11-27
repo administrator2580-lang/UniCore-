@@ -1,7 +1,14 @@
-import React, { useRef, useState } from 'react';
-import { Copy, PauseCircle, Send, Sparkles, Square, X } from 'lucide-react';
+import React, { useMemo, useRef, useState } from 'react';
+import { Copy, FileText, PauseCircle, Send, Sparkles, Square, X } from 'lucide-react';
 import { askAiTutorStream } from '../data/aiTutorService';
 import { incrementDailyCounter } from '../data/firestoreService';
+import {
+  buildCandidateList,
+  findBestMatches,
+  loadMatchedMaterialsForAi,
+  SOURCE_AUTO,
+  SOURCE_NONE
+} from '../data/studyMaterialMatcher';
 
 export default function AiTutorView({
   strings,
@@ -9,13 +16,24 @@ export default function AiTutorView({
   clients,
   userProfile,
   systemSettings,
+  courses = [],
+  driveFiles = [],
+  vaultFiles = [],
   onShowToast
 }) {
   const [prompt, setPrompt] = useState('');
+  const [selectedSourceId, setSelectedSourceId] = useState(SOURCE_AUTO);
   const [status, setStatus] = useState('IDLE'); // IDLE | LOADING | STREAMING | SUCCESS | ERROR | PAUSED
+  const [loadingDetail, setLoadingDetail] = useState('');
   const [answerText, setAnswerText] = useState('');
+  const [usedSources, setUsedSources] = useState([]);
   const [errorMsg, setErrorMsg] = useState('');
   const abortRef = useRef(null);
+
+  const candidates = useMemo(
+    () => buildCandidateList(courses, driveFiles, vaultFiles),
+    [courses, driveFiles, vaultFiles]
+  );
 
   const aiUsedToday = Number(userProfile?.aiCallsToday || 0);
   const aiCap = Math.max(1, Number(systemSettings?.dailyAiLimitPerUser || 20));
@@ -36,16 +54,47 @@ export default function AiTutorView({
     const controller = new AbortController();
     abortRef.current = controller;
 
+    const matched = findBestMatches(clean, candidates, selectedSourceId, 2);
     setStatus('LOADING');
+    setLoadingDetail(
+      matched.length > 0
+        ? `${strings.aiReadingPrefix} ${matched.map((m) => m.fileName || m.displayTitle).join(' • ')}`
+        : strings.tutorConnecting
+    );
     setAnswerText('');
+    setUsedSources([]);
     setErrorMsg('');
 
     try {
+      const materials = await loadMatchedMaterialsForAi({
+        db: clients.db,
+        matchedCandidates: matched
+      });
+      if (controller.signal.aborted) {
+        throw new DOMException('Cancelled', 'AbortError');
+      }
+
+      const sourceLabels = Array.from(new Set(materials.map((m) => m.sourceLabel).filter(Boolean)));
+      setUsedSources(sourceLabels);
+
+      const catalogSummary =
+        materials.length === 0 && candidates.length > 0
+          ? candidates
+              .slice(0, 25)
+              .map(
+                (c) =>
+                  `- ${c.displayTitle} (${c.fileName})${c.contextSubtitle ? `: ${c.contextSubtitle}` : ''}`
+              )
+              .join('\n')
+          : '';
+
       const finalAnswer = await askAiTutorStream({
         app: clients.app,
         config: clients.config,
         prompt: clean,
         language,
+        materials,
+        catalogSummary,
         signal: controller.signal,
         onPartial: (partial) => {
           setStatus('STREAMING');
@@ -117,6 +166,41 @@ export default function AiTutorView({
         </div>
       </div>
 
+      {candidates.length > 0 ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          <div className="field-label">{strings.aiSourcesPickerTitle}</div>
+          <div className="chip-scroll">
+            <button
+              type="button"
+              className={`m3-chip ${selectedSourceId === SOURCE_AUTO ? 'selected' : ''}`}
+              onClick={() => setSelectedSourceId(SOURCE_AUTO)}
+            >
+              <Sparkles size={14} />
+              <span>{strings.aiSourceAuto}</span>
+            </button>
+            {candidates.slice(0, 20).map((c) => (
+              <button
+                key={c.sourceId}
+                type="button"
+                className={`m3-chip ${selectedSourceId === c.sourceId ? 'selected' : ''}`}
+                onClick={() => setSelectedSourceId(c.sourceId)}
+                title={c.contextSubtitle}
+              >
+                <FileText size={14} />
+                <span>{c.fileName || c.displayTitle}</span>
+              </button>
+            ))}
+            <button
+              type="button"
+              className={`m3-chip ${selectedSourceId === SOURCE_NONE ? 'selected' : ''}`}
+              onClick={() => setSelectedSourceId(SOURCE_NONE)}
+            >
+              <span>{strings.aiSourceNone}</span>
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="chip-scroll">
         {[strings.quickPrompt1, strings.quickPrompt2, strings.quickPrompt3].map((q) => (
           <button key={q} type="button" className="m3-chip" onClick={() => setPrompt(q)}>
@@ -143,6 +227,7 @@ export default function AiTutorView({
               setPrompt('');
               setStatus('IDLE');
               setAnswerText('');
+              setUsedSources([]);
             }}
             title={strings.clearLabel}
           >
@@ -185,6 +270,12 @@ export default function AiTutorView({
         ) : null}
       </div>
 
+      {status === 'LOADING' && loadingDetail ? (
+        <div className="muted" style={{ fontWeight: 600, color: 'var(--primary)' }}>
+          {loadingDetail}
+        </div>
+      ) : null}
+
       {status === 'IDLE' ? (
         <div className="m3-card" style={{ alignItems: 'center', textAlign: 'center', padding: '26px' }}>
           <Sparkles size={36} style={{ color: 'var(--primary)' }} />
@@ -208,8 +299,16 @@ export default function AiTutorView({
 
       {(status === 'STREAMING' || status === 'SUCCESS') && answerText ? (
         <div className="m3-card" style={{ borderColor: 'color-mix(in srgb, var(--primary) 35%, transparent)' }}>
-          <div className="row-between">
-            <span className="pill pill-primary">{strings.tutorBannerTitle}</span>
+          <div className="row-between" style={{ alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' }}>
+            <div className="row-gap" style={{ flexWrap: 'wrap' }}>
+              <span className="pill pill-primary">{strings.tutorBannerTitle}</span>
+              {usedSources.map((src) => (
+                <span key={src} className="pill pill-secondary">
+                  <FileText size={13} />
+                  <span>{strings.aiSourcesUsedPrefix}: {src}</span>
+                </span>
+              ))}
+            </div>
             <button
               type="button"
               className="btn btn-text"

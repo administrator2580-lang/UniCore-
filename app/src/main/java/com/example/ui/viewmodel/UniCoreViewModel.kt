@@ -29,6 +29,7 @@ import com.example.data.model.VerifiedFileRecord
 import com.example.data.preferences.AppLanguage
 import com.example.data.repository.AiTutorRepository
 import com.example.data.repository.GoogleDriveSyncRepository
+import com.example.data.repository.StudyMaterialMatcher
 import com.example.data.repository.UniCoreGovernanceRepository
 import com.example.data.repository.UniCoreRepository
 import com.example.security.ImageAttachmentHelper
@@ -66,9 +67,9 @@ sealed interface UiState<out T> {
 
 sealed interface AiUiState {
     data object Idle : AiUiState
-    data object Loading : AiUiState
-    data class Streaming(val text: String) : AiUiState
-    data class Success(val text: String) : AiUiState
+    data class Loading(val statusDetail: String? = null) : AiUiState
+    data class Streaming(val text: String, val usedSources: List<String> = emptyList()) : AiUiState
+    data class Success(val text: String, val usedSources: List<String> = emptyList()) : AiUiState
     data class PausedQuota(val reason: String) : AiUiState
     data class Error(val message: String) : AiUiState
 }
@@ -237,6 +238,14 @@ class UniCoreViewModel(
             else repository.observeVerifiedFiles(currentUserId).asUiState("verified_files")
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Loading)
+
+    val availableAiSources: StateFlow<List<StudyMaterialMatcher.Candidate>> =
+        combine(coursesState, driveFilesState, verifiedFilesState) { coursesUi, driveUi, vaultUi ->
+            val courses = (coursesUi as? UiState.Success)?.data.orEmpty()
+            val driveFiles = (driveUi as? UiState.Success)?.data.orEmpty()
+            val vaultFiles = (vaultUi as? UiState.Success)?.data.orEmpty()
+            StudyMaterialMatcher.buildCandidateList(courses, driveFiles, vaultFiles)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     val notificationsState: StateFlow<UiState<List<UniNotification>>> =
         combine(isActiveSessionFlow, _userRole) { active, role -> active to (role != UserRole.STUDENT) }
@@ -823,7 +832,12 @@ class UniCoreViewModel(
         }
     }
 
-    fun askAiTutor(rawPrompt: String, preferredLanguage: AppLanguage) {
+    fun askAiTutor(
+        context: Context,
+        rawPrompt: String,
+        preferredLanguage: AppLanguage,
+        selectedSourceId: String = StudyMaterialMatcher.SOURCE_AUTO
+    ) {
         activeAiJob?.cancel()
         activeAiJob = viewModelScope.launch {
             val quota = quotaSnapshot.value
@@ -865,15 +879,46 @@ class UniCoreViewModel(
                 _statusBanner.value = "Free-Tier Alert: ${quota.aiUsedToday}/${quota.aiDailyCap} AI calls used."
             }
 
-            _aiUiState.value = AiUiState.Loading
+            val allCandidates = availableAiSources.value
+            val matchedCandidates = StudyMaterialMatcher.findBestMatches(
+                prompt = cleanPrompt,
+                candidates = allCandidates,
+                pinnedSourceId = selectedSourceId,
+                maxResults = 2
+            )
+
+            val initialLoadingText = if (matchedCandidates.isNotEmpty()) {
+                val names = matchedCandidates.joinToString(" • ") { it.fileName }
+                if (preferredLanguage == AppLanguage.ARABIC) "جاري فتح وقراءة: $names..."
+                else "Reading: $names..."
+            } else {
+                null
+            }
+            _aiUiState.value = AiUiState.Loading(initialLoadingText)
+
+            val loadedParts = loadMatchedMaterialsForAi(context, matchedCandidates)
+            val usedLabels = loadedParts.map { it.sourceLabel }.distinct()
+            val catalogSummary = if (loadedParts.isEmpty() && allCandidates.isNotEmpty()) {
+                allCandidates.take(25).joinToString("\n") { c ->
+                    "- ${c.displayTitle} (${c.fileName})${if (c.contextSubtitle.isNotBlank()) ": ${c.contextSubtitle}" else ""}"
+                }
+            } else {
+                ""
+            }
+
             var finalResponse = ""
             try {
-                aiRepository.streamStudyAnswer(cleanPrompt, preferredLanguage).collect { partial ->
+                aiRepository.streamStudyAnswer(
+                    prompt = cleanPrompt,
+                    preferredLanguage = preferredLanguage,
+                    materials = loadedParts,
+                    availableCatalogSummary = catalogSummary
+                ).collect { partial ->
                     finalResponse = partial
-                    _aiUiState.value = AiUiState.Streaming(partial)
+                    _aiUiState.value = AiUiState.Streaming(partial, usedLabels)
                 }
                 if (finalResponse.isNotBlank()) {
-                    _aiUiState.value = AiUiState.Success(finalResponse)
+                    _aiUiState.value = AiUiState.Success(finalResponse, usedLabels)
                     repository.incrementDailyCounter(currentUserId, isAi = true)
                 } else {
                     _aiUiState.value = AiUiState.Error("Tutor returned an empty response.")
@@ -887,6 +932,127 @@ class UniCoreViewModel(
                 Log.e(TAG, "AI Tutor failed", e)
                 _aiUiState.value = AiUiState.Error(
                     InputValidator.safeUserErrorMessage(e, "AI Tutor is temporarily unavailable.")
+                )
+            }
+        }
+    }
+
+    private suspend fun loadMatchedMaterialsForAi(
+        context: Context,
+        candidates: List<StudyMaterialMatcher.Candidate>
+    ): List<AiTutorRepository.AiMaterialPart> {
+        if (candidates.isEmpty()) return emptyList()
+        val parts = mutableListOf<AiTutorRepository.AiMaterialPart>()
+        var cumulativeBytes = 0
+
+        for (candidate in candidates) {
+            when (candidate) {
+                is StudyMaterialMatcher.Candidate.CourseMaterial -> {
+                    val course = candidate.course
+                    val summaryText = buildString {
+                        append("Course Title: ${course.title}\n")
+                        if (!course.departmentName.isNullOrBlank()) append("Department: ${course.departmentName}\n")
+                        if (!course.academicYear.isNullOrBlank()) append("Year: ${course.academicYear}\n")
+                        if (course.description.isNotBlank()) append("Description: ${course.description}\n")
+                    }.trim()
+
+                    var localFile: File? = null
+                    var mime = course.attachmentMimeType ?: "application/pdf"
+                    if (candidate.hasBinaryFile) {
+                        localFile = repository.downloadOrOpenCourseAttachment(context, course).getOrNull()
+                    }
+
+                    val filePart = localFile?.let { file ->
+                        readFileIntoAiPart(
+                            sourceLabel = candidate.fileName,
+                            file = file,
+                            mimeType = mime,
+                            summary = summaryText,
+                            cumulativeBytes = cumulativeBytes
+                        ) { added -> cumulativeBytes += added }
+                    }
+                    parts.add(
+                        filePart ?: AiTutorRepository.AiMaterialPart(
+                            sourceLabel = candidate.displayTitle,
+                            mimeType = "text/plain",
+                            courseSummary = summaryText
+                        )
+                    )
+                }
+                is StudyMaterialMatcher.Candidate.DriveMaterial -> {
+                    val outcome = driveSyncRepository.downloadDriveFile(
+                        context = context,
+                        item = candidate.file,
+                        exportToDownloads = false
+                    ).getOrNull()
+                    if (outcome is GoogleDriveSyncRepository.DriveOpenOutcome.LocalFileReady) {
+                        val filePart = readFileIntoAiPart(
+                            sourceLabel = outcome.file.name.ifBlank { candidate.fileName },
+                            file = outcome.file,
+                            mimeType = outcome.mimeType,
+                            summary = candidate.contextSubtitle,
+                            cumulativeBytes = cumulativeBytes
+                        ) { added -> cumulativeBytes += added }
+                        if (filePart != null) parts.add(filePart)
+                    }
+                }
+                is StudyMaterialMatcher.Candidate.VaultMaterial -> {
+                    val record = candidate.record
+                    val sandboxFile = withContext(Dispatchers.IO) {
+                        File(File(context.filesDir, "secure_uploads"), record.storedName)
+                    }
+                    if (sandboxFile.exists() && sandboxFile.length() > 0L) {
+                        val filePart = readFileIntoAiPart(
+                            sourceLabel = record.originalName,
+                            file = sandboxFile,
+                            mimeType = record.mimeType,
+                            summary = candidate.contextSubtitle,
+                            cumulativeBytes = cumulativeBytes
+                        ) { added -> cumulativeBytes += added }
+                        if (filePart != null) parts.add(filePart)
+                    }
+                }
+            }
+        }
+        return parts
+    }
+
+    private suspend fun readFileIntoAiPart(
+        sourceLabel: String,
+        file: File,
+        mimeType: String,
+        summary: String,
+        cumulativeBytes: Int,
+        onBytesUsed: (Int) -> Unit
+    ): AiTutorRepository.AiMaterialPart? = withContext(Dispatchers.IO) {
+        if (!file.exists() || file.length() <= 0L) return@withContext null
+        val size = file.length()
+        if (StudyMaterialMatcher.isSupportedInlineMediaMime(mimeType) &&
+            size <= StudyMaterialMatcher.MAX_INLINE_FILE_BYTES &&
+            cumulativeBytes + size <= StudyMaterialMatcher.MAX_TOTAL_INLINE_BYTES
+        ) {
+            val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@withContext null
+            onBytesUsed(bytes.size)
+            AiTutorRepository.AiMaterialPart(
+                sourceLabel = sourceLabel,
+                mimeType = mimeType,
+                inlineBytes = bytes,
+                courseSummary = summary
+            )
+        } else {
+            val extracted = StudyMaterialMatcher.extractReadableTextFromDocument(file, mimeType)
+            if (!extracted.isNullOrBlank()) {
+                AiTutorRepository.AiMaterialPart(
+                    sourceLabel = sourceLabel,
+                    mimeType = "text/plain",
+                    extractedText = extracted,
+                    courseSummary = summary
+                )
+            } else {
+                AiTutorRepository.AiMaterialPart(
+                    sourceLabel = sourceLabel,
+                    mimeType = mimeType,
+                    courseSummary = summary
                 )
             }
         }

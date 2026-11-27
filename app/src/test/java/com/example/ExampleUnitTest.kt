@@ -1,8 +1,11 @@
 package com.example
 
+import com.example.data.model.Course
 import com.example.data.model.DriveFolderLink
+import com.example.data.model.DriveSyncedFile
 import com.example.data.repository.AiTutorRepository
 import com.example.data.repository.GoogleDriveSyncRepository
+import com.example.data.repository.StudyMaterialMatcher
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -100,6 +103,54 @@ class ExampleUnitTest {
     assertTrue(cleaned.contains("×"))
     assertTrue(cleaned.contains("(120 ÷ 40)"))
     assertTrue(cleaned.contains("• المقاومة"))
+  }
+
+  @Test
+  fun studyMaterialMatcher_matchesArabicCourseAndDriveFilesWithSpellingVariants() {
+    val courses = listOf(
+      Course(
+        id = "c1",
+        title = "مادة الرياضيات",
+        description = "تفاضل وتكامل",
+        hasAttachment = true,
+        attachmentName = "math_lec1.pdf",
+        attachmentMimeType = "application/pdf",
+        chunkCount = 1L,
+        attachmentSha256 = "abc"
+      ),
+      Course(
+        id = "c2",
+        title = "أساسيات الفيزياء",
+        description = "الميكانيكا",
+        hasAttachment = false
+      )
+    )
+    val driveFiles = listOf(
+      DriveSyncedFile(
+        fileId = "d_elec",
+        folderId = "f1",
+        folderTitle = "طاقة متجددة",
+        name = "محاضرة الكهرباء 1.pdf",
+        viewUrl = "https://drive.google.com/file/d/d_elec/view",
+        downloadUrl = "https://drive.usercontent.google.com/download?id=d_elec"
+      )
+    )
+
+    val candidates = StudyMaterialMatcher.buildCandidateList(courses, driveFiles, emptyList())
+    val matches = StudyMaterialMatcher.findBestMatches(
+      prompt = "عايز شرح ماده الكهربا",
+      candidates = candidates
+    )
+
+    assertEquals(1, matches.size)
+    assertEquals("drive_d_elec", matches.first().sourceId)
+    assertEquals("محاضرة الكهرباء 1.pdf", matches.first().fileName)
+
+    val noMatch = StudyMaterialMatcher.findBestMatches(
+      prompt = "اشرحلي مادة الكيمياء العضوية",
+      candidates = candidates
+    )
+    assertTrue(noMatch.isEmpty())
   }
 }
 

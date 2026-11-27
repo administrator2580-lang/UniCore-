@@ -191,7 +191,11 @@ data class UniCoreStrings(
     val resetCancelledAttemptAction: String,
     val optionWord: String,
     val inAppPreviewTitle: String,
-    val openExternallyAction: String
+    val openExternallyAction: String,
+    val aiSourceAuto: String,
+    val aiSourceNone: String,
+    val aiSourcesPickerTitle: String,
+    val aiSourcesUsedPrefix: String
 )
 
 val EnglishStrings = UniCoreStrings(
@@ -380,7 +384,11 @@ val EnglishStrings = UniCoreStrings(
     resetCancelledAttemptAction = "Unlock Attempt",
     optionWord = "Option",
     inAppPreviewTitle = "In-App File Viewer",
-    openExternallyAction = "Open with External App"
+    openExternallyAction = "Open with External App",
+    aiSourceAuto = "Auto from Uploaded Files",
+    aiSourceNone = "General (No File)",
+    aiSourcesPickerTitle = "Study File Source",
+    aiSourcesUsedPrefix = "Source"
 )
 
 val ArabicStrings = UniCoreStrings(
@@ -569,7 +577,11 @@ val ArabicStrings = UniCoreStrings(
     resetCancelledAttemptAction = "إعادة السماح",
     optionWord = "اختيار",
     inAppPreviewTitle = "عارض الملفات الداخلي",
-    openExternallyAction = "فتح بتطبيق خارجي"
+    openExternallyAction = "فتح بتطبيق خارجي",
+    aiSourceAuto = "تلقائي من الملفات المرفوعة",
+    aiSourceNone = "عام (بدون ملفات)",
+    aiSourcesPickerTitle = "مصدر الشرح من الملفات",
+    aiSourcesUsedPrefix = "المصدر المرفوع"
 )
 
 fun stringsFor(language: AppLanguage): UniCoreStrings = when (language) {

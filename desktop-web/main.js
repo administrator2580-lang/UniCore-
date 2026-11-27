@@ -475,20 +475,29 @@ function registerIpcHandlers() {
             ? 'image/png'
             : ext === '.jpg' || ext === '.jpeg'
               ? 'image/jpeg'
-              : 'application/octet-stream');
+              : ext === '.webp'
+                ? 'image/webp'
+                : ext === '.txt' || ext === '.md' || ext === '.csv'
+                  ? 'text/plain'
+                  : 'application/octet-stream');
+      if (mimeType.startsWith('text/') && stats.size > 0 && stats.size <= 2 * 1024 * 1024) {
+        const textContent = fs.readFileSync(filePath, 'utf8').replace(/\s+/g, ' ').trim().slice(0, 28000);
+        return { base64: null, textContent, mimeType };
+      }
       if (
         stats.size > 0 &&
         stats.size <= MAX_INLINE_PREVIEW_BYTES &&
-        (mimeType === 'application/pdf' || mimeType === 'image/png' || mimeType === 'image/jpeg')
+        (mimeType === 'application/pdf' || mimeType === 'image/png' || mimeType === 'image/jpeg' || mimeType === 'image/webp')
       ) {
         return {
           base64: fs.readFileSync(filePath).toString('base64'),
+          textContent: null,
           mimeType
         };
       }
-      return { base64: null, mimeType };
+      return { base64: null, textContent: null, mimeType };
     } catch {
-      return { base64: null, mimeType: explicitMimeType || 'application/octet-stream' };
+      return { base64: null, textContent: null, mimeType: explicitMimeType || 'application/octet-stream' };
     }
   };
 
@@ -534,6 +543,7 @@ function registerIpcHandlers() {
     const fileId = String(item.fileId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128);
     if (!fileId) throw new Error('Invalid Drive file ID.');
     const openExternally = item.openExternally !== false;
+    const skipDownloadsCopy = item.skipDownloadsCopy === true;
 
     const cacheRoot = getCacheDir();
     const itemCacheDir = path.resolve(cacheRoot, `gdrive_${fileId}`);
@@ -549,7 +559,7 @@ function registerIpcHandlers() {
     });
     if (existing) {
       const existingPath = path.join(itemCacheDir, existing);
-      const downloadsPath = saveCopyToDownloads(existingPath, existing);
+      const downloadsPath = skipDownloadsCopy ? null : saveCopyToDownloads(existingPath, existing);
       const preview = buildPreviewPayload(existingPath);
       if (openExternally) {
         await shell.openPath(downloadsPath || existingPath);
@@ -559,7 +569,8 @@ function registerIpcHandlers() {
         downloadsPath,
         fileName: existing,
         mimeType: preview.mimeType,
-        base64: preview.base64
+        base64: preview.base64,
+        textContent: preview.textContent
       };
     }
 
@@ -599,7 +610,7 @@ function registerIpcHandlers() {
 
     if (!res.fallback && res.path) {
       const finalName = path.basename(res.path);
-      const downloadsPath = saveCopyToDownloads(res.path, finalName);
+      const downloadsPath = skipDownloadsCopy ? null : saveCopyToDownloads(res.path, finalName);
       const preview = buildPreviewPayload(res.path, res.contentType);
       if (openExternally) {
         await shell.openPath(downloadsPath || res.path);
@@ -609,7 +620,8 @@ function registerIpcHandlers() {
         downloadsPath,
         fileName: finalName,
         mimeType: preview.mimeType,
-        base64: preview.base64
+        base64: preview.base64,
+        textContent: preview.textContent
       };
     }
 

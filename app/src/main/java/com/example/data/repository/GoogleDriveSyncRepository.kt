@@ -190,7 +190,11 @@ class GoogleDriveSyncRepository(
         data class FallbackToBrowser(val url: String) : DriveOpenOutcome
     }
 
-    suspend fun downloadDriveFile(context: Context, item: DriveSyncedFile): Result<DriveOpenOutcome> =
+    suspend fun downloadDriveFile(
+        context: Context,
+        item: DriveSyncedFile,
+        exportToDownloads: Boolean = true
+    ): Result<DriveOpenOutcome> =
         withContext(Dispatchers.IO) {
             if (item.isSubFolder) {
                 return@withContext Result.success(DriveOpenOutcome.FallbackToBrowser(item.viewUrl))
@@ -223,7 +227,11 @@ class GoogleDriveSyncRepository(
             }
             if (cachedValid != null) {
                 val cachedMime = inferMimeFromExtension(cachedValid.extension, item.mimeHint)
-                val exported = exportFileToDownloadsFolder(context, cachedValid, cachedMime)
+                val exported = if (exportToDownloads) {
+                    exportFileToDownloadsFolder(context, cachedValid, cachedMime)
+                } else {
+                    false
+                }
                 return@withContext Result.success(
                     DriveOpenOutcome.LocalFileReady(cachedValid, cachedMime, exported)
                 )
@@ -236,7 +244,15 @@ class GoogleDriveSyncRepository(
             ).distinct()
 
             for (candidateUrl in candidateUrls) {
-                val result = tryDownloadUrl(context, itemCacheDir, item, safeFileId, candidateUrl, allowHtmlFollowUp = true)
+                val result = tryDownloadUrl(
+                    context = context,
+                    itemCacheDir = itemCacheDir,
+                    item = item,
+                    safeFileId = safeFileId,
+                    targetUrl = candidateUrl,
+                    allowHtmlFollowUp = true,
+                    exportToDownloads = exportToDownloads
+                )
                 if (result != null) {
                     return@withContext result
                 }
@@ -251,7 +267,8 @@ class GoogleDriveSyncRepository(
         item: DriveSyncedFile,
         safeFileId: String,
         targetUrl: String,
-        allowHtmlFollowUp: Boolean
+        allowHtmlFollowUp: Boolean,
+        exportToDownloads: Boolean = true
     ): Result<DriveOpenOutcome>? {
         return try {
             val request = Request.Builder()
@@ -276,7 +293,8 @@ class GoogleDriveSyncRepository(
                             item,
                             safeFileId,
                             confirmUrl,
-                            allowHtmlFollowUp = false
+                            allowHtmlFollowUp = false,
+                            exportToDownloads = exportToDownloads
                         )
                     }
                     return null
@@ -354,7 +372,11 @@ class GoogleDriveSyncRepository(
                 if (targetFile.exists()) targetFile.delete()
                 tmpFile.renameTo(targetFile)
 
-                val exported = exportFileToDownloadsFolder(context, targetFile, resolvedMime)
+                val exported = if (exportToDownloads) {
+                    exportFileToDownloadsFolder(context, targetFile, resolvedMime)
+                } else {
+                    false
+                }
                 Result.success(DriveOpenOutcome.LocalFileReady(targetFile, resolvedMime, exported))
             }
         } catch (_: Exception) {

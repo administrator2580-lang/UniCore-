@@ -191,7 +191,12 @@ export const EnglishStrings = {
   resetAttemptAction: 'Unlock / Reset Attempt',
   previewInAppAction: 'View Inside App',
   downloadedSavedToast: 'Saved to Downloads/UniCore:',
-  profanityBlockedToast: 'Message blocked due to inappropriate language.'
+  profanityBlockedToast: 'Message blocked due to inappropriate language.',
+  aiSourceAuto: 'Auto from Uploaded Files',
+  aiSourceNone: 'General (No File)',
+  aiSourcesPickerTitle: 'Study File Source',
+  aiSourcesUsedPrefix: 'Source',
+  aiReadingPrefix: 'Reading uploaded file:'
 };
 
 export const ArabicStrings = {
@@ -387,7 +392,12 @@ export const ArabicStrings = {
   resetAttemptAction: 'إعادة إتاحة الاختبار',
   previewInAppAction: 'معاينة داخل التطبيق',
   downloadedSavedToast: 'تم الحفظ في Downloads/UniCore:',
-  profanityBlockedToast: 'تم رفض النص لاحتوائه على ألفاظ خارجة.'
+  profanityBlockedToast: 'تم رفض النص لاحتوائه على ألفاظ خارجة.',
+  aiSourceAuto: 'تلقائي من الملفات المرفوعة',
+  aiSourceNone: 'عام (بدون ملفات)',
+  aiSourcesPickerTitle: 'مصدر الشرح من الملفات',
+  aiSourcesUsedPrefix: 'المصدر المرفوع',
+  aiReadingPrefix: 'جاري فتح وقراءة الملف:'
 };
 
 export function stringsFor(lang) {
