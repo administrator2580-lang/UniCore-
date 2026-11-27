@@ -40,7 +40,9 @@ data class UserPreferences(
     val language: AppLanguage = if (Locale.getDefault().language == "ar") AppLanguage.ARABIC else AppLanguage.ENGLISH,
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
     val systemNotificationsEnabled: Boolean = true,
-    val readNotificationIds: Set<String> = emptySet()
+    val notificationSoundEnabled: Boolean = true,
+    val readNotificationIds: Set<String> = emptySet(),
+    val scheduledReminderIds: Set<String> = emptySet()
 )
 
 private val Context.userPrefsDataStore: DataStore<Preferences> by preferencesDataStore(
@@ -54,7 +56,9 @@ class UserPreferencesRepository(private val context: Context) {
             language = AppLanguage.fromCode(prefs[KEY_LANGUAGE]),
             themeMode = AppThemeMode.fromRaw(prefs[KEY_THEME_MODE]),
             systemNotificationsEnabled = prefs[KEY_SYSTEM_NOTIFICATIONS] ?: true,
-            readNotificationIds = prefs[KEY_READ_NOTIFICATION_IDS] ?: emptySet()
+            notificationSoundEnabled = prefs[KEY_SOUND_ENABLED] ?: true,
+            readNotificationIds = prefs[KEY_READ_NOTIFICATION_IDS] ?: emptySet(),
+            scheduledReminderIds = prefs[KEY_SCHEDULED_REMINDERS] ?: emptySet()
         )
     }
 
@@ -76,11 +80,16 @@ class UserPreferencesRepository(private val context: Context) {
         }
     }
 
+    suspend fun setNotificationSoundEnabled(enabled: Boolean) {
+        context.userPrefsDataStore.edit { prefs ->
+            prefs[KEY_SOUND_ENABLED] = enabled
+        }
+    }
+
     suspend fun markNotificationRead(notificationId: String) {
         if (notificationId.isBlank()) return
         context.userPrefsDataStore.edit { prefs ->
             val current = prefs[KEY_READ_NOTIFICATION_IDS] ?: emptySet()
-            // Keep bounded to last 200 read IDs to avoid unbounded DataStore growth
             val updated = (current + notificationId).toList().takeLast(200).toSet()
             prefs[KEY_READ_NOTIFICATION_IDS] = updated
         }
@@ -95,10 +104,21 @@ class UserPreferencesRepository(private val context: Context) {
         }
     }
 
+    suspend fun markReminderScheduled(reminderKey: String) {
+        if (reminderKey.isBlank()) return
+        context.userPrefsDataStore.edit { prefs ->
+            val current = prefs[KEY_SCHEDULED_REMINDERS] ?: emptySet()
+            val updated = (current + reminderKey).toList().takeLast(200).toSet()
+            prefs[KEY_SCHEDULED_REMINDERS] = updated
+        }
+    }
+
     private companion object {
         val KEY_LANGUAGE = stringPreferencesKey("app_language")
         val KEY_THEME_MODE = stringPreferencesKey("app_theme_mode")
         val KEY_SYSTEM_NOTIFICATIONS = booleanPreferencesKey("system_notifications_enabled")
+        val KEY_SOUND_ENABLED = booleanPreferencesKey("notification_sound_enabled")
         val KEY_READ_NOTIFICATION_IDS = stringSetPreferencesKey("read_notification_ids")
+        val KEY_SCHEDULED_REMINDERS = stringSetPreferencesKey("scheduled_assignment_reminders")
     }
 }

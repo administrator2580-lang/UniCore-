@@ -63,7 +63,9 @@ fun AccountsManagementCard(
     onInviteAccount: (String, String, UserRole) -> Unit,
     onRevokeInvite: (String) -> Unit,
     onPromoteUser: (UserProfile) -> Unit,
+    onPromoteSuperAdmin: (UserProfile) -> Unit,
     onDemoteAdmin: (String) -> Unit,
+    onDemoteSuperAdmin: (String) -> Unit,
     onToggleAccountDisabled: (UserProfile, Boolean) -> Unit,
     onTimedBanUser: (UserProfile, Long, String) -> Unit
 ) {
@@ -227,6 +229,18 @@ fun AccountsManagementCard(
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.primary
                                 )
+                                val placementSummary = listOfNotNull(
+                                    user.departmentName?.takeIf { it.isNotBlank() },
+                                    user.academicYear?.takeIf { it.isNotBlank() },
+                                    user.sectionName?.takeIf { it.isNotBlank() }
+                                ).joinToString(" • ")
+                                if (placementSummary.isNotBlank()) {
+                                    Text(
+                                        text = placementSummary,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.secondary
+                                    )
+                                }
                                 if (isTimedBanned) {
                                     val formatted = remember(user.banUntilMillis) {
                                         SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
@@ -266,41 +280,72 @@ fun AccountsManagementCard(
                             }
                         }
 
-                        if ((currentRole == UserRole.SUPER_ADMIN && user.userId != currentUserId && roleEnum != UserRole.SUPER_ADMIN) || canTimedBan) {
+                        if ((currentRole == UserRole.SUPER_ADMIN && user.userId != currentUserId) || canTimedBan) {
                             FlowRow(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                if (currentRole == UserRole.SUPER_ADMIN && user.userId != currentUserId && roleEnum != UserRole.SUPER_ADMIN) {
-                                    if (roleEnum == UserRole.STUDENT) {
-                                        OutlinedButton(onClick = { onPromoteUser(user) }) {
-                                            Text(strings.promoteToAdmin)
+                                if (currentRole == UserRole.SUPER_ADMIN && user.userId != currentUserId) {
+                                    when (roleEnum) {
+                                        UserRole.STUDENT -> {
+                                            OutlinedButton(
+                                                onClick = { onPromoteUser(user) },
+                                                modifier = Modifier.testTag("promote_admin_${user.userId}")
+                                            ) {
+                                                Text(strings.promoteToAdmin)
+                                            }
+                                            OutlinedButton(
+                                                onClick = { onPromoteSuperAdmin(user) },
+                                                modifier = Modifier.testTag("promote_super_${user.userId}")
+                                            ) {
+                                                Text(strings.promoteToSuperAdmin)
+                                            }
                                         }
-                                    } else if (roleEnum == UserRole.ADMIN) {
-                                        OutlinedButton(onClick = { onDemoteAdmin(user.userId) }) {
-                                            Text(strings.demoteToStudent)
+                                        UserRole.ADMIN -> {
+                                            OutlinedButton(
+                                                onClick = { onPromoteSuperAdmin(user) },
+                                                modifier = Modifier.testTag("promote_super_${user.userId}")
+                                            ) {
+                                                Text(strings.promoteToSuperAdmin)
+                                            }
+                                            OutlinedButton(
+                                                onClick = { onDemoteAdmin(user.userId) },
+                                                modifier = Modifier.testTag("demote_student_${user.userId}")
+                                            ) {
+                                                Text(strings.demoteToStudent)
+                                            }
+                                        }
+                                        UserRole.SUPER_ADMIN -> {
+                                            OutlinedButton(
+                                                onClick = { onDemoteSuperAdmin(user.userId) },
+                                                modifier = Modifier.testTag("demote_admin_${user.userId}")
+                                            ) {
+                                                Text(strings.demoteToAdmin)
+                                            }
                                         }
                                     }
 
-                                    val nextDisabled = !user.accountDisabled
-                                    OutlinedButton(
-                                        onClick = { onToggleAccountDisabled(user, nextDisabled) },
-                                        colors = ButtonDefaults.outlinedButtonColors(
-                                            contentColor = if (nextDisabled) {
-                                                MaterialTheme.colorScheme.error
-                                            } else {
-                                                MaterialTheme.colorScheme.secondary
-                                            }
-                                        ),
-                                        modifier = Modifier.testTag("toggle_account_disabled_${user.userId}")
-                                    ) {
-                                        Icon(
-                                            imageVector = if (nextDisabled) Icons.Default.Block else Icons.Default.CheckCircle,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(Modifier.size(4.dp))
-                                        Text(if (nextDisabled) strings.disableAccountAction else strings.enableAccountAction)
+                                    if (roleEnum != UserRole.SUPER_ADMIN) {
+                                        val nextDisabled = !user.accountDisabled
+                                        OutlinedButton(
+                                            onClick = { onToggleAccountDisabled(user, nextDisabled) },
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                contentColor = if (nextDisabled) {
+                                                    MaterialTheme.colorScheme.error
+                                                } else {
+                                                    MaterialTheme.colorScheme.secondary
+                                                }
+                                            ),
+                                            modifier = Modifier.testTag("toggle_account_disabled_${user.userId}")
+                                        ) {
+                                            Icon(
+                                                imageVector = if (nextDisabled) Icons.Default.Block else Icons.Default.CheckCircle,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(Modifier.size(4.dp))
+                                            Text(if (nextDisabled) strings.disableAccountAction else strings.enableAccountAction)
+                                        }
                                     }
                                 }
 
@@ -440,6 +485,7 @@ private fun TimedBanDialog(
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AddAccountDialog(
     isSuperAdmin: Boolean,
@@ -476,7 +522,10 @@ private fun AddAccountDialog(
                         .testTag("invite_email_input")
                 )
                 Text(text = strings.selectRoleLabel, style = MaterialTheme.typography.labelMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     FilterChip(
                         selected = selectedRole == UserRole.STUDENT,
                         onClick = { selectedRole = UserRole.STUDENT },
@@ -487,6 +536,12 @@ private fun AddAccountDialog(
                             selected = selectedRole == UserRole.ADMIN,
                             onClick = { selectedRole = UserRole.ADMIN },
                             label = { Text(strings.roleAdmin) }
+                        )
+                        FilterChip(
+                            selected = selectedRole == UserRole.SUPER_ADMIN,
+                            onClick = { selectedRole = UserRole.SUPER_ADMIN },
+                            label = { Text(strings.roleSuperAdmin) },
+                            modifier = Modifier.testTag("invite_super_admin_chip")
                         )
                     }
                 }

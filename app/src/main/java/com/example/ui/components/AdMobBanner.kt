@@ -5,7 +5,6 @@ import android.view.ViewGroup
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.material3.HorizontalDivider
@@ -34,6 +33,7 @@ import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
 import com.google.android.gms.ads.LoadAdError
 import com.google.android.gms.ads.MobileAds
+import com.google.android.gms.ads.RequestConfiguration
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +48,12 @@ fun initializeMobileAdsOnce(context: Context) {
         val appContext = context.applicationContext
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching {
+                if (BuildConfig.DEBUG) {
+                    val config = RequestConfiguration.Builder()
+                        .setTestDeviceIds(listOf(AdRequest.DEVICE_ID_EMULATOR))
+                        .build()
+                    MobileAds.setRequestConfiguration(config)
+                }
                 MobileAds.initialize(appContext) {}
             }
         }
@@ -88,7 +94,7 @@ fun AdMobBannerBar(
         contentAlignment = Alignment.Center
     ) {
         val adWidthDp = maxWidth.value.toInt().coerceIn(320, 728)
-        var isAdLoaded by remember(adUnitId, adWidthDp) { mutableStateOf(false) }
+        var adFailed by remember(adUnitId, adWidthDp) { mutableStateOf(false) }
 
         val adView = remember(context, adUnitId, adWidthDp) {
             AdView(context).apply {
@@ -105,11 +111,11 @@ fun AdMobBannerBar(
                 )
                 adListener = object : AdListener() {
                     override fun onAdLoaded() {
-                        isAdLoaded = true
+                        adFailed = false
                     }
 
                     override fun onAdFailedToLoad(error: LoadAdError) {
-                        isAdLoaded = false
+                        adFailed = true
                     }
                 }
                 loadAd(AdRequest.Builder().build())
@@ -131,34 +137,27 @@ fun AdMobBannerBar(
             }
         }
 
-        Surface(
-            modifier = if (isAdLoaded) Modifier.fillMaxWidth() else Modifier.height(0.dp),
-            color = MaterialTheme.colorScheme.surface
-        ) {
-            Box(
+        if (!adFailed) {
+            Surface(
                 modifier = Modifier.fillMaxWidth(),
-                contentAlignment = Alignment.Center
+                color = MaterialTheme.colorScheme.surface
             ) {
-                if (isAdLoaded) {
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
                     HorizontalDivider(
                         modifier = Modifier.align(Alignment.TopCenter),
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                     )
+                    AndroidView(
+                        factory = { adView },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .wrapContentHeight()
+                            .padding(vertical = 2.dp)
+                    )
                 }
-                AndroidView(
-                    factory = { adView },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .then(
-                            if (isAdLoaded) {
-                                Modifier
-                                    .wrapContentHeight()
-                                    .padding(vertical = 2.dp)
-                            } else {
-                                Modifier.height(0.dp)
-                            }
-                        )
-                )
             }
         }
     }

@@ -1087,7 +1087,312 @@ test("16. Academic Departments & Years RBAC: Only Admins and SuperAdmins can cre
   );
 });
 
+test("17. Flexible Super Admin grants, manual super_admin role recognition, and self-promotion block", async () => {
+  await seedRolesAndBaseData();
+  const aliceDb = testEnv.authenticatedContext(STUDENT_A, { email: "alice@unicore.edu", email_verified: true }).firestore();
+  const superDb = testEnv.authenticatedContext(SUPER_ADMIN_UID, { email: BOOTSTRAP_EMAIL, email_verified: true }).firestore();
 
+  // Student CANNOT self-assign super_admin or SUPER_ADMIN
+  await assertFails(
+    aliceDb.collection("users").doc(STUDENT_A).update({
+      role: "super_admin",
+      updatedAt: pastDate(100),
+    })
+  );
 
+  // Existing Super Admin can invite a new SUPER_ADMIN
+  await assertSucceeds(
+    superDb.collection("role_invites").doc("newsuper@unicore.edu").set({
+      email: "newsuper@unicore.edu",
+      displayNameHint: "New Super",
+      assignedRole: "SUPER_ADMIN",
+      invitedBy: SUPER_ADMIN_UID,
+      invitedByLabel: "Super Dave",
+      status: "PENDING",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
 
+  // Invited user claims SUPER_ADMIN role
+  const newSuperDb = testEnv.authenticatedContext("new_super_uid", {
+    email: "newsuper@unicore.edu",
+    email_verified: true,
+  }).firestore();
+
+  await assertSucceeds(
+    newSuperDb.collection("super_admins").doc("new_super_uid").set({
+      userId: "new_super_uid",
+      email: "newsuper@unicore.edu",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+  await assertSucceeds(
+    newSuperDb.collection("users").doc("new_super_uid").set({
+      userId: "new_super_uid",
+      displayName: "New Super",
+      role: "SUPER_ADMIN",
+      aiCallsToday: 0,
+      writesToday: 0,
+      quotaDayKey: "2026-11-27",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Manual Firestore Console `role: "super_admin"` on users doc grants Super Admin powers
+  await testEnv.withSecurityRulesDisabled(async (ctx) => {
+    await ctx.firestore().collection("users").doc("console_super").set({
+      userId: "console_super",
+      displayName: "Console Super",
+      role: "super_admin",
+      aiCallsToday: 0,
+      writesToday: 0,
+      quotaDayKey: "2026-11-27",
+      createdAt: pastDate(20000),
+      updatedAt: pastDate(20000),
+    });
+  });
+  const consoleSuperDb = testEnv.authenticatedContext("console_super").firestore();
+  await assertSucceeds(consoleSuperDb.collection("audit_logs").get());
+  await assertSucceeds(
+    consoleSuperDb.collection("system_settings").doc("global").update({
+      tutorialVideoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      tutorialVideoTitle: "UniCore Guide",
+      updatedBy: "console_super",
+      updatedAt: pastDate(100),
+    })
+  );
+});
+
+test("18. User onboarding placement (Year & Section), favorites, and completed assignments", async () => {
+  await seedRolesAndBaseData();
+  const aliceDb = testEnv.authenticatedContext(STUDENT_A).firestore();
+  const bobDb = testEnv.authenticatedContext(STUDENT_B).firestore();
+
+  await assertSucceeds(
+    aliceDb.collection("users").doc(STUDENT_A).update({
+      departmentId: "dept_re",
+      departmentName: "طاقة متجددة",
+      academicYear: "الفرقة الأولى",
+      sectionName: "سيكشن 2",
+      placementCompleted: true,
+      favoriteCourseIds: ["course_cs101"],
+      completedAssignmentIds: ["assign_1"],
+      classroomConnected: true,
+      updatedAt: pastDate(100),
+    })
+  );
+
+  // Bob CANNOT alter Alice's placement or favorites
+  await assertFails(
+    bobDb.collection("users").doc(STUDENT_A).update({
+      academicYear: "الفرقة الرابعة",
+      updatedAt: pastDate(50),
+    })
+  );
+});
+
+test("19. Assignments ('اللي عليا') & Google Classroom isolation rules", async () => {
+  await seedRolesAndBaseData();
+  const aliceDb = testEnv.authenticatedContext(STUDENT_A).firestore();
+  const bobDb = testEnv.authenticatedContext(STUDENT_B).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+
+  // Admin publishes shared assignment
+  await assertSucceeds(
+    adminDb.collection("assignments").doc("assign_shared").set({
+      title: "Circuit Analysis Lab 1",
+      description: "Solve problems 1-5",
+      courseId: "course_cs101",
+      courseTitle: "Circuits",
+      departmentName: "طاقة متجددة",
+      academicYear: "الفرقة الأولى",
+      sectionName: "سيكشن 1",
+      dueAtMillis: Date.now() + 86400000,
+      sourceType: "APP",
+      ownerUid: "ALL",
+      published: true,
+      createdBy: ADMIN_UID,
+      createdByName: "Dr. Carol",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Student CANNOT publish shared 'ALL' assignment
+  await assertFails(
+    aliceDb.collection("assignments").doc("assign_fake_all").set({
+      title: "Fake Assignment",
+      description: "Not allowed",
+      dueAtMillis: Date.now() + 86400000,
+      sourceType: "APP",
+      ownerUid: "ALL",
+      published: true,
+      createdBy: STUDENT_A,
+      createdByName: "Alice Student",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Student CAN import personal Google Classroom assignment scoped to own UID
+  await assertSucceeds(
+    aliceDb.collection("assignments").doc("assign_gc_alice").set({
+      title: "GC Homework",
+      description: "Synced from Classroom",
+      dueAtMillis: Date.now() + 172800000,
+      classroomLink: "https://classroom.google.com/c/123",
+      sourceType: "CLASSROOM",
+      ownerUid: STUDENT_A,
+      published: true,
+      createdBy: STUDENT_A,
+      createdByName: "Alice Student",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Alice filtered query (where ownerUid in ['ALL', STUDENT_A]) succeeds; Bob cannot read Alice's personal Classroom assignment
+  await assertSucceeds(
+    aliceDb.collection("assignments").where("ownerUid", "in", ["ALL", STUDENT_A]).get()
+  );
+  await assertFails(bobDb.collection("assignments").doc("assign_gc_alice").get());
+  await assertFails(bobDb.collection("assignments").where("ownerUid", "in", ["ALL", STUDENT_A]).get());
+});
+
+test("20. Schedule items, Zoom sessions, Instructions, and Course lecture videos RBAC", async () => {
+  await seedRolesAndBaseData();
+  const aliceDb = testEnv.authenticatedContext(STUDENT_A).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+
+  await assertSucceeds(
+    adminDb.collection("courses").doc("course_cs101").update({
+      sectionName: "سيكشن 1",
+      videoUrl: "https://www.youtube.com/watch?v=abc12345",
+      videoTitle: "Lecture 1 Video",
+      updatedAt: pastDate(100),
+    })
+  );
+
+  await assertSucceeds(
+    adminDb.collection("schedule_items").doc("sched_1").set({
+      title: "Power Systems Lecture",
+      itemType: "LECTURE",
+      dayOfWeek: 0,
+      startTimeText: "09:00",
+      endTimeText: "11:00",
+      locationOrMode: "Hall A",
+      academicYear: "الفرقة الأولى",
+      sectionName: "سيكشن 1",
+      videoUrl: "https://www.youtube.com/watch?v=abc12345",
+      published: true,
+      createdBy: ADMIN_UID,
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  await assertSucceeds(
+    adminDb.collection("zoom_sessions").doc("zoom_1").set({
+      title: "Live Revision",
+      topic: "Midterm Q&A",
+      zoomUrl: "https://zoom.us/j/1234567890",
+      scheduledAtMillis: Date.now() + 3600000,
+      durationMinutes: 60,
+      hostName: "Dr. Carol",
+      academicYear: "الفرقة الأولى",
+      sectionName: "سيكشن 1",
+      published: true,
+      createdBy: ADMIN_UID,
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  await assertSucceeds(
+    adminDb.collection("instructions").doc("inst_1").set({
+      title: "Exam Rules",
+      body: "Bring student ID to all midterm halls.",
+      priority: "PINNED",
+      academicYear: "ALL",
+      sectionName: "ALL",
+      published: true,
+      createdBy: ADMIN_UID,
+      createdByName: "Dr. Carol",
+      createdAt: pastDate(),
+      updatedAt: pastDate(),
+    })
+  );
+
+  // Active student can query published collections
+  await assertSucceeds(aliceDb.collection("schedule_items").where("published", "==", true).get());
+  await assertSucceeds(aliceDb.collection("zoom_sessions").where("published", "==", true).get());
+  await assertSucceeds(aliceDb.collection("instructions").where("published", "==", true).get());
+
+  // Student cannot write or delete schedule/zoom/instructions
+  await assertFails(aliceDb.collection("schedule_items").doc("sched_1").delete());
+  await assertFails(aliceDb.collection("zoom_sessions").doc("zoom_1").delete());
+  await assertFails(aliceDb.collection("instructions").doc("inst_1").delete());
+});
+
+test("21. Section messages RBAC: Students post MESSAGE unpinned; Admins post pinned NOTICE", async () => {
+  await seedRolesAndBaseData();
+  const aliceDb = testEnv.authenticatedContext(STUDENT_A).firestore();
+  const bobDb = testEnv.authenticatedContext(STUDENT_B).firestore();
+  const adminDb = testEnv.authenticatedContext(ADMIN_UID).firestore();
+
+  // Student cannot post pinned NOTICE or impersonate ADMIN
+  await assertFails(
+    aliceDb.collection("section_messages").doc("sec_bad").set({
+      departmentName: "طاقة متجددة",
+      academicYear: "الفرقة الأولى",
+      sectionName: "سيكشن 1",
+      senderUid: STUDENT_A,
+      senderName: "Alice Student",
+      senderRole: "STUDENT",
+      messageType: "NOTICE",
+      isPinned: true,
+      text: "Fake notice",
+      createdAt: pastDate(),
+    })
+  );
+
+  // Student posts valid section MESSAGE
+  await assertSucceeds(
+    aliceDb.collection("section_messages").doc("sec_alice_1").set({
+      departmentName: "طاقة متجددة",
+      academicYear: "الفرقة الأولى",
+      sectionName: "سيكشن 1",
+      senderUid: STUDENT_A,
+      senderName: "Alice Student",
+      senderRole: "STUDENT",
+      messageType: "MESSAGE",
+      isPinned: false,
+      text: "Hello Section 1 classmates!",
+      createdAt: pastDate(),
+    })
+  );
+
+  // Admin posts pinned NOTICE
+  await assertSucceeds(
+    adminDb.collection("section_messages").doc("sec_admin_1").set({
+      departmentName: "طاقة متجددة",
+      academicYear: "الفرقة الأولى",
+      sectionName: "سيكشن 1",
+      senderUid: ADMIN_UID,
+      senderName: "Dr. Carol",
+      senderRole: "ADMIN",
+      messageType: "NOTICE",
+      isPinned: true,
+      text: "Lab moved to Room 204.",
+      createdAt: pastDate(),
+    })
+  );
+
+  // Bob cannot delete Alice's message; Admin can delete any message
+  await assertFails(bobDb.collection("section_messages").doc("sec_alice_1").delete());
+  await assertSucceeds(adminDb.collection("section_messages").doc("sec_alice_1").delete());
+});
 

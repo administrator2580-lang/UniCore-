@@ -21,15 +21,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
@@ -78,6 +81,7 @@ fun SecurityConsoleScreen(
     currentLanguage: AppLanguage,
     currentThemeMode: AppThemeMode,
     systemNotificationsEnabled: Boolean,
+    notificationSoundEnabled: Boolean,
     auditLogsState: UiState<List<AuditLog>>,
     usersDirectoryState: UiState<List<UserProfile>>,
     roleInvitesState: UiState<List<RoleInvite>>,
@@ -85,15 +89,20 @@ fun SecurityConsoleScreen(
     onSetLanguage: (AppLanguage) -> Unit,
     onSetThemeMode: (AppThemeMode) -> Unit,
     onSetSystemNotifications: (Boolean) -> Unit,
+    onSetNotificationSound: (Boolean) -> Unit,
+    onTestSound: () -> Unit,
+    onOpenPlacementEditor: () -> Unit,
     onInviteAccount: (String, String, UserRole) -> Unit,
     onRevokeInvite: (String) -> Unit,
     onPromoteUser: (UserProfile) -> Unit,
+    onPromoteSuperAdmin: (UserProfile) -> Unit,
     onDemoteAdmin: (String) -> Unit,
+    onDemoteSuperAdmin: (String) -> Unit,
     onToggleAccountDisabled: (UserProfile, Boolean) -> Unit,
     onTimedBanUser: (UserProfile, Long, String) -> Unit,
     onSendSupportMessage: (String, String, Uri?) -> Unit,
     onReplySupportMessage: (SupportMessage, String, Uri?) -> Unit,
-    onUpdateSettings: (Long, Long, Boolean, Boolean) -> Unit,
+    onUpdateSettings: (Long, Long, Boolean, Boolean, String?, String?) -> Unit,
     onSignOut: () -> Unit
 ) {
     val strings = LocalAppStrings.current
@@ -170,6 +179,59 @@ fun SecurityConsoleScreen(
                                 fontWeight = FontWeight.SemiBold,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                             )
+                        }
+                    }
+
+                    val placementText = listOfNotNull(
+                        userProfile?.departmentName?.takeIf { it.isNotBlank() },
+                        userProfile?.academicYear?.takeIf { it.isNotBlank() },
+                        userProfile?.sectionName?.takeIf { it.isNotBlank() }
+                    ).joinToString(" • ")
+
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    Icons.Default.School,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Column {
+                                    Text(
+                                        text = strings.myAcademicInfoLabel,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = placementText.ifBlank { strings.placementSubtitle },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = onOpenPlacementEditor,
+                                modifier = Modifier.testTag("edit_placement_button")
+                            ) {
+                                Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.size(4.dp))
+                                Text(strings.editPlacementAction)
+                            }
                         }
                     }
 
@@ -341,6 +403,46 @@ fun SecurityConsoleScreen(
                             modifier = Modifier.testTag("system_notifications_switch")
                         )
                     }
+
+                    // Custom UniCore Notification Sound Toggle & Preview
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = strings.soundNotificationsLabel,
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                        }
+                        Switch(
+                            checked = notificationSoundEnabled,
+                            onCheckedChange = onSetNotificationSound,
+                            modifier = Modifier.testTag("sound_notifications_switch")
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onTestSound,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("test_sound_button")
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(8.dp))
+                        Text(strings.testSoundAction)
+                    }
                 }
             }
         }
@@ -367,7 +469,9 @@ fun SecurityConsoleScreen(
                     onInviteAccount = onInviteAccount,
                     onRevokeInvite = onRevokeInvite,
                     onPromoteUser = onPromoteUser,
+                    onPromoteSuperAdmin = onPromoteSuperAdmin,
                     onDemoteAdmin = onDemoteAdmin,
+                    onDemoteSuperAdmin = onDemoteSuperAdmin,
                     onToggleAccountDisabled = onToggleAccountDisabled,
                     onTimedBanUser = onTimedBanUser
                 )
@@ -482,13 +586,15 @@ fun SecurityConsoleScreen(
 @Composable
 private fun SuperAdminControlsCard(
     settings: SystemSettings,
-    onUpdateSettings: (Long, Long, Boolean, Boolean) -> Unit
+    onUpdateSettings: (Long, Long, Boolean, Boolean, String?, String?) -> Unit
 ) {
     val strings = LocalAppStrings.current
     var aiEnabled by remember(settings.aiEnabled) { mutableStateOf(settings.aiEnabled) }
     var zeroCostLock by remember(settings.zeroCostLockActive) { mutableStateOf(settings.zeroCostLockActive) }
     var aiLimitText by remember(settings.dailyAiLimitPerUser) { mutableStateOf(settings.dailyAiLimitPerUser.toString()) }
     var writeLimitText by remember(settings.dailyWriteLimitPerUser) { mutableStateOf(settings.dailyWriteLimitPerUser.toString()) }
+    var tutorialTitle by remember(settings.tutorialVideoTitle) { mutableStateOf(settings.tutorialVideoTitle.orEmpty()) }
+    var tutorialUrl by remember(settings.tutorialVideoUrl) { mutableStateOf(settings.tutorialVideoUrl.orEmpty()) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -542,13 +648,36 @@ private fun SuperAdminControlsCard(
                 )
             }
 
+            OutlinedTextField(
+                value = tutorialTitle,
+                onValueChange = { tutorialTitle = it },
+                label = { Text(strings.editTutorialVideoTitle) },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("tutorial_video_title_input")
+            )
+
+            OutlinedTextField(
+                value = tutorialUrl,
+                onValueChange = { tutorialUrl = it },
+                label = { Text(strings.editTutorialVideoUrl) },
+                placeholder = { Text("https://youtu.be/...") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("tutorial_video_url_input")
+            )
+
             Button(
                 onClick = {
                     onUpdateSettings(
                         aiLimitText.toLongOrNull() ?: 20L,
                         writeLimitText.toLongOrNull() ?: 100L,
                         aiEnabled,
-                        zeroCostLock
+                        zeroCostLock,
+                        tutorialUrl.trim().ifBlank { null },
+                        tutorialTitle.trim().ifBlank { null }
                     )
                 },
                 modifier = Modifier

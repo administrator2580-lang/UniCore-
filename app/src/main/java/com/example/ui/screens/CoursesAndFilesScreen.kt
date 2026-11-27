@@ -45,9 +45,13 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadForOffline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.OfflinePin
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Search
@@ -89,10 +93,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.model.AcademicDepartment
+import com.example.data.model.AcademicScopeFilter
 import com.example.data.model.Course
 import com.example.data.model.DriveFolderLink
 import com.example.data.model.DriveSyncedFile
 import com.example.data.model.MaterialType
+import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
 import com.example.data.model.VerifiedFileRecord
 import com.example.security.InputValidator
@@ -110,6 +116,7 @@ fun CoursesScreen(
     departmentsState: UiState<List<AcademicDepartment>>,
     driveFoldersState: UiState<List<DriveFolderLink>>,
     driveFilesState: UiState<List<DriveSyncedFile>>,
+    filesState: UiState<List<VerifiedFileRecord>> = UiState.Success(emptyList()),
     isDriveRefreshing: Boolean,
     downloadedDriveFileIds: Set<String> = emptySet(),
     downloadingOfflineIds: Set<String> = emptySet(),
@@ -117,10 +124,14 @@ fun CoursesScreen(
     openingCourseId: String?,
     openingDriveFileId: String?,
     userRole: UserRole,
-    onCreateCourseWithFile: (String, String, String, MaterialType, Uri?, String?, String?, String?) -> Unit,
-    onUpdateCourseDetails: (String, String, String, String?, String?, String?) -> Unit,
+    userProfile: UserProfile? = null,
+    onCreateCourseWithFile: (String, String, String, MaterialType, Uri?, String?, String?, String?, String?, String?, String?) -> Unit,
+    onUpdateCourseDetails: (String, String, String, String?, String?, String?, String?, String?, String?) -> Unit,
     onDeleteCourse: (String) -> Unit,
     onOpenCourseAttachment: (Course) -> Unit,
+    onToggleFavoriteCourse: (String) -> Unit = {},
+    onPickVaultFile: (Uri) -> Unit = {},
+    onDeleteVaultFile: (VerifiedFileRecord) -> Unit = {},
     onSaveDepartment: (String?, String, List<String>) -> Unit,
     onDeleteDepartment: (String) -> Unit,
     onLinkDriveFolder: (String, String, String?, String?, String?) -> Unit,
@@ -143,32 +154,77 @@ fun CoursesScreen(
     var editingDepartment by remember { mutableStateOf<AcademicDepartment?>(null) }
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf<MaterialType?>(null) }
+    var favoritesOnly by remember { mutableStateOf(false) }
+    var showPersonalVault by remember { mutableStateOf(false) }
     var selectedDepartmentId by remember { mutableStateOf<String?>(null) }
     var selectedYear by remember { mutableStateOf<String?>(null) }
 
     val canManage = userRole != UserRole.STUDENT
     val isSuperAdmin = userRole == UserRole.SUPER_ADMIN
+    val favoriteIds = remember(userProfile?.favoriteCourseIds) {
+        userProfile?.favoriteCourseIds?.toSet() ?: emptySet()
+    }
     val departments = (departmentsState as? UiState.Success)?.data.orEmpty()
     val selectedDept = remember(departments, selectedDepartmentId) {
         departments.firstOrNull { it.id == selectedDepartmentId }
     }
     val allDriveFolders = (driveFoldersState as? UiState.Success)?.data.orEmpty()
-    val visibleDriveFolders = remember(allDriveFolders, selectedDept, selectedYear) {
+    val visibleDriveFolders = remember(allDriveFolders, selectedDept, selectedYear, userProfile, userRole) {
         allDriveFolders.filter { folder ->
+            val inStudentScope = AcademicScopeFilter.matchesStudentScope(
+                userProfile = userProfile,
+                userRole = userRole,
+                itemDeptId = folder.departmentId,
+                itemDeptName = folder.departmentName,
+                itemYear = folder.academicYear,
+                itemSection = null
+            )
             val matchesDept = selectedDept == null ||
                 folder.departmentId == selectedDept.id ||
                 folder.departmentName.equals(selectedDept.name, ignoreCase = true)
             val matchesYear = selectedYear == null || folder.academicYear == selectedYear
-            matchesDept && matchesYear
+            inStudentScope && matchesDept && matchesYear
         }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
+        // Sub-navigation toggle between Library/Courses & Personal File Vault
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = !showPersonalVault,
+                onClick = { showPersonalVault = false },
+                leadingIcon = { Icon(Icons.Default.School, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                label = { Text(strings.navCourses) },
+                modifier = Modifier.testTag("courses_subtab_library")
+            )
+            FilterChip(
+                selected = showPersonalVault,
+                onClick = { showPersonalVault = true },
+                leadingIcon = { Icon(Icons.Default.FolderSpecial, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                label = { Text(strings.navFiles) },
+                modifier = Modifier.testTag("courses_subtab_vault")
+            )
+        }
+
+        if (showPersonalVault) {
+            SecureFilesVaultScreen(
+                filesState = filesState,
+                onFilePicked = onPickVaultFile,
+                onDeleteFile = onDeleteVaultFile
+            )
+            return@Column
+        }
+
         // Search + Department/Year Filter + Admin Controls
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(horizontal = 16.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
@@ -197,8 +253,8 @@ fun CoursesScreen(
                 }
             }
 
-            // Academic Departments & Years Selector (Only Admin & SuperAdmin can create/edit/delete)
-            if (departments.isNotEmpty() || canManage) {
+            // Academic Departments & Years Selector
+            if (canManage || (!userProfile?.placementCompleted.let { it == true } && departments.isNotEmpty())) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -319,6 +375,19 @@ fun CoursesScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 FilterChip(
+                    selected = favoritesOnly,
+                    onClick = { favoritesOnly = !favoritesOnly },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = if (favoritesOnly) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    label = { Text("${strings.favoritesFilter} (${favoriteIds.size})") },
+                    modifier = Modifier.testTag("courses_favorites_filter")
+                )
+                FilterChip(
                     selected = selectedFilter == null,
                     onClick = { selectedFilter = null },
                     label = { Text(strings.allTypes) }
@@ -334,8 +403,17 @@ fun CoursesScreen(
         }
 
         val filteredCourses = when (coursesState) {
-            is UiState.Success -> remember(coursesState.data, searchQuery, selectedFilter, selectedDept, selectedYear) {
+            is UiState.Success -> remember(coursesState.data, searchQuery, selectedFilter, selectedDept, selectedYear, favoritesOnly, favoriteIds, userProfile, userRole) {
                 coursesState.data.filter { course ->
+                    val matchesScope = AcademicScopeFilter.matchesStudentScope(
+                        userProfile = userProfile,
+                        userRole = userRole,
+                        itemDeptId = course.departmentId,
+                        itemDeptName = course.departmentName,
+                        itemYear = course.academicYear,
+                        itemSection = course.sectionName
+                    )
+                    val matchesFav = !favoritesOnly || course.id in favoriteIds
                     val matchesFilter = selectedFilter == null || course.materialType == selectedFilter?.name
                     val matchesDept = selectedDept == null ||
                         course.departmentId == selectedDept.id ||
@@ -347,7 +425,7 @@ fun CoursesScreen(
                         (course.attachmentName?.contains(searchQuery.trim(), ignoreCase = true) == true) ||
                         (course.departmentName?.contains(searchQuery.trim(), ignoreCase = true) == true) ||
                         (course.academicYear?.contains(searchQuery.trim(), ignoreCase = true) == true)
-                    matchesFilter && matchesDept && matchesYear && matchesQuery
+                    matchesScope && matchesFav && matchesFilter && matchesDept && matchesYear && matchesQuery
                 }
             }
             else -> emptyList()
@@ -359,7 +437,7 @@ fun CoursesScreen(
         val scopedDriveFilesState = when (driveFilesState) {
             is UiState.Success -> {
                 val actualFiles = driveFilesState.data.filterNot { it.isSubFolder }
-                if (selectedDept == null && selectedYear == null) {
+                if (userRole != UserRole.STUDENT && selectedDept == null && selectedYear == null) {
                     UiState.Success(actualFiles)
                 } else {
                     UiState.Success(actualFiles.filter { it.folderId in allowedFolderIds })
@@ -376,7 +454,7 @@ fun CoursesScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxSize()
         ) {
-            if (showLibraryCard) {
+            if (showLibraryCard && !favoritesOnly) {
                 item(key = "study_library_card") {
                     StudyLibrarySectionCard(
                         hasConfiguredFolders = allDriveFolders.isNotEmpty(),
@@ -431,8 +509,10 @@ fun CoursesScreen(
                         items(filteredCourses, key = { it.id }) { course ->
                             CourseCard(
                                 course = course,
+                                isFavorite = course.id in favoriteIds,
                                 canManage = canManage,
                                 isDownloading = openingCourseId == course.id,
+                                onToggleFavorite = { onToggleFavoriteCourse(course.id) },
                                 onEdit = { editingCourse = course },
                                 onDelete = { onDeleteCourse(course.id) },
                                 onOpenAttachment = { onOpenCourseAttachment(course) },
@@ -460,8 +540,8 @@ fun CoursesScreen(
             initialDepartmentId = selectedDept?.id,
             initialYear = selectedYear,
             onDismiss = { showCreateDialog = false },
-            onConfirm = { title, desc, link, type, fileUri, deptId, deptName, year ->
-                onCreateCourseWithFile(title, desc, link, type, fileUri, deptId, deptName, year)
+            onConfirm = { title, desc, link, type, fileUri, deptId, deptName, year, section, videoUrl, videoTitle ->
+                onCreateCourseWithFile(title, desc, link, type, fileUri, deptId, deptName, year, section, videoUrl, videoTitle)
                 showCreateDialog = false
             }
         )
@@ -473,8 +553,8 @@ fun CoursesScreen(
             course = targetCourseEdit,
             departments = departments,
             onDismiss = { editingCourse = null },
-            onConfirm = { title, desc, deptId, deptName, year ->
-                onUpdateCourseDetails(targetCourseEdit.id, title, desc, deptId, deptName, year)
+            onConfirm = { title, desc, deptId, deptName, year, section, videoUrl, videoTitle ->
+                onUpdateCourseDetails(targetCourseEdit.id, title, desc, deptId, deptName, year, section, videoUrl, videoTitle)
                 editingCourse = null
             }
         )
@@ -1008,8 +1088,10 @@ private fun StorageVaultManagerDialog(
 @Composable
 private fun CourseCard(
     course: Course,
+    isFavorite: Boolean,
     canManage: Boolean,
     isDownloading: Boolean,
+    onToggleFavorite: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onOpenAttachment: () -> Unit,
@@ -1059,6 +1141,10 @@ private fun CourseCard(
                                     append(" • ")
                                     append(course.academicYear)
                                 }
+                                if (!course.sectionName.isNullOrBlank()) {
+                                    append(" • ")
+                                    append(course.sectionName)
+                                }
                             }
                             Text(
                                 text = deptTag,
@@ -1072,11 +1158,17 @@ private fun CourseCard(
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "${strings.byInstructor} ${course.instructorName}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    IconButton(
+                        onClick = onToggleFavorite,
+                        modifier = Modifier.testTag("favorite_course_${course.id}")
+                    ) {
+                        Icon(
+                            imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = strings.favoritesFilter,
+                            tint = if (isFavorite) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                     if (canManage) {
                         IconButton(onClick = onEdit, modifier = Modifier.testTag("edit_course_${course.id}")) {
                             Icon(
@@ -1103,7 +1195,7 @@ private fun CourseCard(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = course.description,
+                text = "${strings.byInstructor} ${course.instructorName} — ${course.description}",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1141,6 +1233,27 @@ private fun CourseCard(
                 }
             }
 
+            if (!course.videoUrl.isNullOrBlank()) {
+                FilledTonalButton(
+                    onClick = { onOpenLink(course.videoUrl) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("watch_course_video_${course.id}")
+                ) {
+                    Icon(
+                        Icons.Default.PlayCircle,
+                        contentDescription = strings.watchVideoAction,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.size(8.dp))
+                    Text(
+                        text = course.videoTitle?.takeIf { it.isNotBlank() } ?: strings.watchVideoAction,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
             if (!course.materialLink.isNullOrBlank()) {
                 OutlinedButton(
                     onClick = { onOpenLink(course.materialLink) },
@@ -1160,7 +1273,7 @@ private fun CourseCard(
 }
 
 @Composable
-private fun DepartmentYearPickerBlock(
+internal fun DepartmentYearPickerBlock(
     departments: List<AcademicDepartment>,
     selectedDeptId: String?,
     selectedYear: String?,
@@ -1220,13 +1333,16 @@ private fun CreateCourseDialog(
     initialDepartmentId: String?,
     initialYear: String?,
     onDismiss: () -> Unit,
-    onConfirm: (String, String, String, MaterialType, Uri?, String?, String?, String?) -> Unit
+    onConfirm: (String, String, String, MaterialType, Uri?, String?, String?, String?, String?, String?, String?) -> Unit
 ) {
     val context = LocalContext.current
     val strings = LocalAppStrings.current
     var title by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
     var link by remember { mutableStateOf("") }
+    var sectionName by remember { mutableStateOf("") }
+    var videoUrl by remember { mutableStateOf("") }
+    var videoTitle by remember { mutableStateOf("") }
     var selectedType by remember { mutableStateOf(MaterialType.FILE) }
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
     var selectedFileName by remember { mutableStateOf<String?>(null) }
@@ -1362,6 +1478,30 @@ private fun CreateCourseDialog(
                     onSelectYear = { chosenYear = it }
                 )
                 OutlinedTextField(
+                    value = sectionName,
+                    onValueChange = { sectionName = it },
+                    label = { Text(strings.sectionLabel) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = videoUrl,
+                    onValueChange = { videoUrl = it },
+                    label = { Text(strings.videoUrlLabel) },
+                    placeholder = { Text("https://youtube.com/...") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("course_video_url_input")
+                )
+                if (videoUrl.isNotBlank()) {
+                    OutlinedTextField(
+                        value = videoTitle,
+                        onValueChange = { videoTitle = it },
+                        label = { Text(strings.videoTitleLabel) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                OutlinedTextField(
                     value = link,
                     onValueChange = { link = it },
                     label = { Text(strings.optionalLinkAndNotes) },
@@ -1394,7 +1534,10 @@ private fun CreateCourseDialog(
                         selectedUri,
                         chosenDept?.id,
                         chosenDept?.name,
-                        chosenYear
+                        chosenYear,
+                        sectionName.trim().ifBlank { null },
+                        videoUrl.trim().ifBlank { null },
+                        videoTitle.trim().ifBlank { null }
                     )
                 },
                 modifier = Modifier.testTag("confirm_create_course")
@@ -1413,13 +1556,16 @@ private fun EditCourseDialog(
     course: Course,
     departments: List<AcademicDepartment>,
     onDismiss: () -> Unit,
-    onConfirm: (String, String, String?, String?, String?) -> Unit
+    onConfirm: (String, String, String?, String?, String?, String?, String?, String?) -> Unit
 ) {
     val strings = LocalAppStrings.current
     var title by remember(course.id) { mutableStateOf(course.title) }
     var description by remember(course.id) { mutableStateOf(course.description) }
     var chosenDeptId by remember(course.id) { mutableStateOf(course.departmentId) }
     var chosenYear by remember(course.id) { mutableStateOf(course.academicYear) }
+    var sectionName by remember(course.id) { mutableStateOf(course.sectionName.orEmpty()) }
+    var videoUrl by remember(course.id) { mutableStateOf(course.videoUrl.orEmpty()) }
+    var videoTitle by remember(course.id) { mutableStateOf(course.videoTitle.orEmpty()) }
     val chosenDept = departments.firstOrNull { it.id == chosenDeptId }
 
     AlertDialog(
@@ -1454,6 +1600,27 @@ private fun EditCourseDialog(
                     },
                     onSelectYear = { chosenYear = it }
                 )
+                OutlinedTextField(
+                    value = sectionName,
+                    onValueChange = { sectionName = it },
+                    label = { Text(strings.sectionLabel) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = videoUrl,
+                    onValueChange = { videoUrl = it },
+                    label = { Text(strings.videoUrlLabel) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = videoTitle,
+                    onValueChange = { videoTitle = it },
+                    label = { Text(strings.videoTitleLabel) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         },
         confirmButton = {
@@ -1464,7 +1631,10 @@ private fun EditCourseDialog(
                         description,
                         chosenDept?.id,
                         chosenDept?.name,
-                        chosenYear
+                        chosenYear,
+                        sectionName.trim().ifBlank { null },
+                        videoUrl.trim().ifBlank { null },
+                        videoTitle.trim().ifBlank { null }
                     )
                 },
                 enabled = title.isNotBlank() && description.isNotBlank()

@@ -243,9 +243,6 @@ class UniCoreGovernanceRepository(
         if (email.length !in 3..120 || !emailRegex.matches(email)) {
             return Result.failure(IllegalArgumentException("Enter a valid Google email address."))
         }
-        if (assignedRole == UserRole.SUPER_ADMIN) {
-            return Result.failure(IllegalArgumentException("Super Admin role cannot be assigned via invite."))
-        }
         val cleanHint = when (val r = InputValidator.validateBoundedText(rawNameHint, "Name", 2, 60)) {
             is InputValidator.ValidationResult.Valid -> r.value
             is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
@@ -388,6 +385,118 @@ class UniCoreGovernanceRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun promoteUserToSuperAdmin(targetUser: UserProfile): Result<Unit> {
+        val cleanUid = when (val r = InputValidator.validateId(targetUser.userId)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val superPath = "super_admins/$cleanUid"
+        return try {
+            requireUserId()
+            val piiEmail = runCatching {
+                db.collection("users").document(cleanUid).collection("private").document("pii").get().await()
+                    .getString("email")
+            }.getOrNull()?.takeIf { it.length in 3..120 } ?: "${cleanUid.take(12)}@unicore.edu"
+
+            db.collection("super_admins").document(cleanUid).set(
+                mapOf(
+                    "userId" to cleanUid,
+                    "email" to piiEmail,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            runCatching {
+                db.collection("admins").document(cleanUid).delete().await()
+            }
+
+            db.collection("users").document(cleanUid).update(
+                mapOf(
+                    "role" to UserRole.SUPER_ADMIN.name,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            logAuditEvent(
+                action = "SUPER_ADMIN_GRANTED",
+                severity = AuditSeverity.HIGH,
+                targetPath = superPath,
+                details = "Super Admin granted SUPER_ADMIN role to ${targetUser.displayName}."
+            )
+            sendNotification(
+                title = "Super Admin Access Granted",
+                body = "Your UniCore account has been promoted to Super Admin.",
+                category = NotificationCategory.ROLE,
+                targetUid = cleanUid
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, superPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun demoteSuperAdminToAdmin(targetUid: String): Result<Unit> {
+        val cleanUid = when (val r = InputValidator.validateId(targetUid)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val superPath = "super_admins/$cleanUid"
+        return try {
+            val actorUid = requireUserId()
+            if (cleanUid == actorUid) {
+                return Result.failure(IllegalArgumentException("You cannot demote your own Super Admin account."))
+            }
+            val piiEmail = runCatching {
+                db.collection("users").document(cleanUid).collection("private").document("pii").get().await()
+                    .getString("email")
+            }.getOrNull()?.takeIf { it.length in 3..120 } ?: "${cleanUid.take(12)}@unicore.edu"
+
+            db.collection("super_admins").document(cleanUid).delete().await()
+
+            db.collection("admins").document(cleanUid).set(
+                mapOf(
+                    "userId" to cleanUid,
+                    "email" to piiEmail,
+                    "grantedBy" to actorUid,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+
+            runCatching {
+                db.collection("users").document(cleanUid).update(
+                    mapOf(
+                        "role" to UserRole.ADMIN.name,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+
+            logAuditEvent(
+                action = "ROLE_CHANGED",
+                severity = AuditSeverity.HIGH,
+                targetPath = superPath,
+                details = "Super Admin changed $cleanUid from SUPER_ADMIN to ADMIN."
+            )
+            sendNotification(
+                title = "Role Updated",
+                body = "Your UniCore role has been updated to Admin.",
+                category = NotificationCategory.ROLE,
+                targetUid = cleanUid
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, superPath)
             Result.failure(e)
         }
     }
@@ -980,27 +1089,40 @@ class UniCoreGovernanceRepository(
         dailyAiLimit: Long,
         dailyWriteLimit: Long,
         aiEnabled: Boolean,
-        zeroCostLockActive: Boolean
+        zeroCostLockActive: Boolean,
+        tutorialVideoUrl: String? = null,
+        tutorialVideoTitle: String? = null
     ): Result<Unit> {
+        val cleanTutorialUrl = when (val r = InputValidator.validateOptionalHttpsUrl(tutorialVideoUrl)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        if (!tutorialVideoTitle.isNullOrBlank() && InputValidator.containsInjectionPayload(tutorialVideoTitle)) {
+            return Result.failure(IllegalArgumentException("Tutorial title contains disallowed characters."))
+        }
+        val cleanTutorialTitle = tutorialVideoTitle?.let { InputValidator.sanitizeText(it).take(120) }?.takeIf { it.isNotBlank() }
+
         val docPath = "system_settings/global"
         return try {
             val uid = requireUserId()
-            db.collection("system_settings").document("global").update(
-                mapOf(
-                    "dailyAiLimitPerUser" to dailyAiLimit.coerceIn(1L, 100L),
-                    "dailyWriteLimitPerUser" to dailyWriteLimit.coerceIn(10L, 500L),
-                    "aiEnabled" to aiEnabled,
-                    "zeroCostLockActive" to zeroCostLockActive,
-                    "updatedBy" to uid,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val updates = mutableMapOf<String, Any>(
+                "dailyAiLimitPerUser" to dailyAiLimit.coerceIn(1L, 100L),
+                "dailyWriteLimitPerUser" to dailyWriteLimit.coerceIn(10L, 500L),
+                "aiEnabled" to aiEnabled,
+                "zeroCostLockActive" to zeroCostLockActive,
+                "updatedBy" to uid,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            updates["tutorialVideoUrl"] = cleanTutorialUrl ?: FieldValue.delete()
+            updates["tutorialVideoTitle"] = cleanTutorialTitle ?: FieldValue.delete()
+
+            db.collection("system_settings").document("global").update(updates).await()
 
             logAuditEvent(
-                action = "SETTINGS_CHANGED",
+                action = if (cleanTutorialUrl != null) "TUTORIAL_UPDATED" else "SETTINGS_CHANGED",
                 severity = AuditSeverity.HIGH,
                 targetPath = docPath,
-                details = "Super Admin updated zero-cost settings: aiLimit=$dailyAiLimit, aiEnabled=$aiEnabled, lock=$zeroCostLockActive"
+                details = "Super Admin updated settings: aiLimit=$dailyAiLimit, aiEnabled=$aiEnabled, lock=$zeroCostLockActive, hasTutorial=${cleanTutorialUrl != null}"
             )
             Result.success(Unit)
         } catch (e: CancellationException) {

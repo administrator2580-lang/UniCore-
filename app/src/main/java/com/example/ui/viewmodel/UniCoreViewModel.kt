@@ -8,16 +8,23 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.AcademicDepartment
 import com.example.data.model.AdminRecord
+import com.example.data.model.AssignmentItem
 import com.example.data.model.AuditLog
 import com.example.data.model.AuditSeverity
 import com.example.data.model.Course
 import com.example.data.model.DriveFolderLink
 import com.example.data.model.DriveSyncedFile
+import com.example.data.model.InstructionNotice
+import com.example.data.model.InstructionPriority
 import com.example.data.model.MaterialType
 import com.example.data.model.NotificationCategory
 import com.example.data.model.Quiz
 import com.example.data.model.QuizAttempt
 import com.example.data.model.RoleInvite
+import com.example.data.model.ScheduleItem
+import com.example.data.model.ScheduleItemType
+import com.example.data.model.SectionMessage
+import com.example.data.model.SectionMessageType
 import com.example.data.model.StudyChatMessage
 import com.example.data.model.SupportChannel
 import com.example.data.model.SupportMessage
@@ -26,6 +33,7 @@ import com.example.data.model.UniNotification
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
 import com.example.data.model.VerifiedFileRecord
+import com.example.data.model.ZoomSession
 import com.example.data.preferences.AppLanguage
 import com.example.data.repository.AiTutorRepository
 import com.example.data.repository.GoogleDriveSyncRepository
@@ -330,6 +338,46 @@ class UniCoreViewModel(
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Success(emptyList()))
 
+    val assignmentsState: StateFlow<UiState<List<AssignmentItem>>> =
+        combine(isActiveSessionFlow, _userRole) { active, role -> active to (role != UserRole.STUDENT) }
+            .flatMapLatest { (active, isAdmin) ->
+                if (!active) flowOf(UiState.Loading)
+                else repository.observeAssignments(isAdmin).asUiState("assignments")
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Loading)
+
+    val scheduleItemsState: StateFlow<UiState<List<ScheduleItem>>> =
+        combine(isActiveSessionFlow, _userRole) { active, role -> active to (role != UserRole.STUDENT) }
+            .flatMapLatest { (active, isAdmin) ->
+                if (!active) flowOf(UiState.Loading)
+                else repository.observeScheduleItems(isAdmin).asUiState("schedule_items")
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Loading)
+
+    val zoomSessionsState: StateFlow<UiState<List<ZoomSession>>> =
+        combine(isActiveSessionFlow, _userRole) { active, role -> active to (role != UserRole.STUDENT) }
+            .flatMapLatest { (active, isAdmin) ->
+                if (!active) flowOf(UiState.Loading)
+                else repository.observeZoomSessions(isAdmin).asUiState("zoom_sessions")
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Loading)
+
+    val instructionsState: StateFlow<UiState<List<InstructionNotice>>> =
+        combine(isActiveSessionFlow, _userRole) { active, role -> active to (role != UserRole.STUDENT) }
+            .flatMapLatest { (active, isAdmin) ->
+                if (!active) flowOf(UiState.Loading)
+                else repository.observeInstructions(isAdmin).asUiState("instructions")
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Loading)
+
+    val sectionMessagesState: StateFlow<UiState<List<SectionMessage>>> =
+        isActiveSessionFlow
+            .flatMapLatest { active ->
+                if (!active) flowOf(UiState.Success(emptyList()))
+                else repository.observeSectionMessages().asUiState("section_messages")
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Success(emptyList()))
+
     fun selectChatRoom(departmentId: String?, yearIndex: Int?) {
         _selectedChatRoomId.value = governance.buildChatRoomId(departmentId, yearIndex)
     }
@@ -371,7 +419,10 @@ class UniCoreViewModel(
         selectedFileUri: Uri?,
         departmentId: String? = null,
         departmentName: String? = null,
-        academicYear: String? = null
+        academicYear: String? = null,
+        sectionName: String? = null,
+        videoUrl: String? = null,
+        videoTitle: String? = null
     ) {
         viewModelScope.launch {
             if (_userRole.value == UserRole.STUDENT) {
@@ -428,7 +479,10 @@ class UniCoreViewModel(
                 attachedFile = validatedFile,
                 departmentId = departmentId,
                 departmentName = departmentName,
-                academicYear = academicYear
+                academicYear = academicYear,
+                sectionName = sectionName,
+                videoUrl = videoUrl,
+                videoTitle = videoTitle
             )
             _statusBanner.value = result.fold(
                 onSuccess = {
@@ -446,7 +500,10 @@ class UniCoreViewModel(
         description: String,
         departmentId: String?,
         departmentName: String?,
-        academicYear: String?
+        academicYear: String?,
+        sectionName: String? = null,
+        videoUrl: String? = null,
+        videoTitle: String? = null
     ) {
         viewModelScope.launch {
             if (_userRole.value == UserRole.STUDENT) {
@@ -466,7 +523,10 @@ class UniCoreViewModel(
                 description = description,
                 departmentId = departmentId,
                 departmentName = departmentName,
-                academicYear = academicYear
+                academicYear = academicYear,
+                sectionName = sectionName,
+                videoUrl = videoUrl,
+                videoTitle = videoTitle
             )
             _statusBanner.value = result.fold(
                 onSuccess = { "Course updated." },
@@ -1363,14 +1423,14 @@ class UniCoreViewModel(
                 _statusBanner.value = "Access denied."
                 return@launch
             }
-            if (assignedRole == UserRole.ADMIN && _userRole.value != UserRole.SUPER_ADMIN) {
+            if ((assignedRole == UserRole.ADMIN || assignedRole == UserRole.SUPER_ADMIN) && _userRole.value != UserRole.SUPER_ADMIN) {
                 governance.logAuditEvent(
                     "UNAUTHORIZED_ADMIN_ATTEMPT",
                     AuditSeverity.CRITICAL,
                     "role_invites",
-                    "Regular Admin attempted to invite an Admin account."
+                    "Regular Admin attempted to invite an Admin/SuperAdmin account."
                 )
-                _statusBanner.value = "Only Super Admin can add Admin accounts."
+                _statusBanner.value = "Only Super Admin can add Admin or Super Admin accounts."
                 return@launch
             }
             val res = governance.inviteAccountByEmail(email, nameHint, assignedRole)
@@ -1472,6 +1532,371 @@ class UniCoreViewModel(
         }
     }
 
+    fun promoteUserToSuperAdmin(targetUser: UserProfile) {
+        viewModelScope.launch {
+            if (_userRole.value != UserRole.SUPER_ADMIN) {
+                governance.logAuditEvent(
+                    "UNAUTHORIZED_SUPER_ADMIN_ATTEMPT",
+                    AuditSeverity.CRITICAL,
+                    "super_admins/${targetUser.userId}",
+                    "Non-SuperAdmin attempted Super Admin promotion."
+                )
+                _statusBanner.value = "Only Super Admin can grant Super Admin privileges."
+                return@launch
+            }
+            val res = governance.promoteUserToSuperAdmin(targetUser)
+            _statusBanner.value = res.fold(
+                onSuccess = { "${targetUser.displayName} promoted to Super Admin." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Promotion failed.") }
+            )
+        }
+    }
+
+    fun demoteSuperAdminToAdmin(targetUid: String) {
+        viewModelScope.launch {
+            if (_userRole.value != UserRole.SUPER_ADMIN) return@launch
+            val res = governance.demoteSuperAdminToAdmin(targetUid)
+            _statusBanner.value = res.fold(
+                onSuccess = { "Super Admin demoted to Admin." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not update role.") }
+            )
+        }
+    }
+
+    // --- Placement, Favorites, Assignments, Schedule, Zoom, Instructions & Section Messages ---
+
+    fun saveAcademicPlacement(
+        departmentId: String?,
+        departmentName: String,
+        academicYear: String,
+        sectionName: String
+    ) {
+        viewModelScope.launch {
+            val res = repository.saveUserAcademicPlacement(
+                departmentId = departmentId,
+                departmentName = departmentName,
+                academicYear = academicYear,
+                sectionName = sectionName,
+                governance = governance
+            )
+            _statusBanner.value = res.fold(
+                onSuccess = { "$departmentName • $academicYear • $sectionName" },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not save placement.") }
+            )
+        }
+    }
+
+    fun toggleFavoriteCourse(courseId: String) {
+        viewModelScope.launch {
+            val currentFavs = userProfile.value?.favoriteCourseIds.orEmpty()
+            val res = repository.toggleFavoriteCourse(courseId, currentFavs)
+            res.onFailure { err ->
+                _statusBanner.value = InputValidator.safeUserErrorMessage(err, "Could not update favorites.")
+            }
+        }
+    }
+
+    fun toggleAssignmentCompleted(assignmentId: String) {
+        viewModelScope.launch {
+            val currentCompleted = userProfile.value?.completedAssignmentIds.orEmpty()
+            val res = repository.toggleAssignmentCompleted(assignmentId, currentCompleted)
+            res.onFailure { err ->
+                _statusBanner.value = InputValidator.safeUserErrorMessage(err, "Could not update assignment status.")
+            }
+        }
+    }
+
+    fun setClassroomConnected(connected: Boolean) {
+        viewModelScope.launch {
+            repository.setClassroomConnected(connected)
+        }
+    }
+
+    fun createAssignment(
+        title: String,
+        description: String,
+        dueAtMillis: Long,
+        courseId: String? = null,
+        courseTitle: String? = null,
+        departmentId: String? = null,
+        departmentName: String? = null,
+        academicYear: String? = null,
+        sectionName: String? = null,
+        classroomLink: String? = null,
+        videoUrl: String? = null,
+        sourceType: String = "APP"
+    ) {
+        viewModelScope.launch {
+            val isPersonalClassroom = sourceType == "CLASSROOM"
+            if (!isPersonalClassroom && _userRole.value == UserRole.STUDENT) {
+                _statusBanner.value = "Access denied: Admin privileges required."
+                return@launch
+            }
+            if (!checkWriteQuota()) return@launch
+            val res = repository.createAssignment(
+                title = title,
+                description = description,
+                dueAtMillis = dueAtMillis,
+                courseId = courseId,
+                courseTitle = courseTitle,
+                departmentId = departmentId,
+                departmentName = departmentName,
+                academicYear = academicYear,
+                sectionName = sectionName,
+                classroomLink = classroomLink,
+                videoUrl = videoUrl,
+                sourceType = sourceType,
+                governance = governance
+            )
+            _statusBanner.value = res.fold(
+                onSuccess = { if (isPersonalClassroom) "Imported from Google Classroom." else "Assignment published." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not save assignment.") }
+            )
+        }
+    }
+
+    fun importClassroomAssignments(
+        items: List<Triple<String, String, Long>>,
+        classroomLinks: List<String?> = emptyList(),
+        courseTitles: List<String?> = emptyList()
+    ) {
+        viewModelScope.launch {
+            if (!checkWriteQuota()) return@launch
+            val profile = userProfile.value
+            var count = 0
+            items.forEachIndexed { idx, (title, desc, dueMs) ->
+                val res = repository.createAssignment(
+                    title = title,
+                    description = desc,
+                    dueAtMillis = dueMs,
+                    courseTitle = courseTitles.getOrNull(idx),
+                    departmentId = profile?.departmentId,
+                    departmentName = profile?.departmentName,
+                    academicYear = profile?.academicYear,
+                    sectionName = profile?.sectionName,
+                    classroomLink = classroomLinks.getOrNull(idx),
+                    sourceType = "CLASSROOM",
+                    governance = governance
+                )
+                if (res.isSuccess) count++
+            }
+            if (count > 0) {
+                repository.setClassroomConnected(true)
+                _statusBanner.value = "Synced $count assignments from Google Classroom."
+            } else {
+                _statusBanner.value = "No assignments imported."
+            }
+        }
+    }
+
+    fun deleteAssignment(assignmentId: String) {
+        viewModelScope.launch {
+            val res = repository.deleteAssignment(assignmentId)
+            _statusBanner.value = res.fold(
+                onSuccess = { "Assignment removed." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not delete assignment.") }
+            )
+        }
+    }
+
+    fun createScheduleItem(
+        title: String,
+        itemType: ScheduleItemType,
+        dayOfWeek: Int,
+        startTimeText: String,
+        endTimeText: String,
+        locationOrMode: String,
+        instructorName: String?,
+        departmentId: String?,
+        departmentName: String?,
+        academicYear: String?,
+        sectionName: String?,
+        courseId: String?,
+        videoUrl: String?,
+        dueAtMillis: Long = 0L
+    ) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) {
+                _statusBanner.value = "Access denied: Admin privileges required."
+                return@launch
+            }
+            if (!checkWriteQuota()) return@launch
+            val res = repository.createScheduleItem(
+                title = title,
+                itemType = itemType,
+                dayOfWeek = dayOfWeek,
+                startTimeText = startTimeText,
+                endTimeText = endTimeText,
+                locationOrMode = locationOrMode,
+                instructorName = instructorName,
+                departmentId = departmentId,
+                departmentName = departmentName,
+                academicYear = academicYear,
+                sectionName = sectionName,
+                courseId = courseId,
+                videoUrl = videoUrl,
+                dueAtMillis = dueAtMillis,
+                governance = governance
+            )
+            _statusBanner.value = res.fold(
+                onSuccess = { "Schedule updated." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Failed to add schedule entry.") }
+            )
+        }
+    }
+
+    fun deleteScheduleItem(itemId: String) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) return@launch
+            val res = repository.deleteScheduleItem(itemId)
+            _statusBanner.value = res.fold(
+                onSuccess = { "Schedule entry deleted." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not delete entry.") }
+            )
+        }
+    }
+
+    fun createZoomSession(
+        title: String,
+        topic: String,
+        zoomUrl: String,
+        scheduledAtMillis: Long,
+        durationMinutes: Int,
+        departmentId: String?,
+        departmentName: String?,
+        academicYear: String?,
+        sectionName: String?,
+        courseId: String? = null
+    ) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) {
+                _statusBanner.value = "Access denied: Admin privileges required."
+                return@launch
+            }
+            if (!checkWriteQuota()) return@launch
+            val res = repository.createZoomSession(
+                title = title,
+                topic = topic,
+                zoomUrl = zoomUrl,
+                scheduledAtMillis = scheduledAtMillis,
+                durationMinutes = durationMinutes,
+                departmentId = departmentId,
+                departmentName = departmentName,
+                academicYear = academicYear,
+                sectionName = sectionName,
+                courseId = courseId,
+                governance = governance
+            )
+            _statusBanner.value = res.fold(
+                onSuccess = { "Live Zoom session published." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not publish Zoom session.") }
+            )
+        }
+    }
+
+    fun deleteZoomSession(sessionId: String) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) return@launch
+            val res = repository.deleteZoomSession(sessionId)
+            _statusBanner.value = res.fold(
+                onSuccess = { "Zoom session deleted." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not delete Zoom session.") }
+            )
+        }
+    }
+
+    fun createInstruction(
+        title: String,
+        body: String,
+        priority: InstructionPriority,
+        departmentId: String?,
+        departmentName: String?,
+        academicYear: String?,
+        sectionName: String?
+    ) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) {
+                _statusBanner.value = "Access denied: Admin privileges required."
+                return@launch
+            }
+            if (!checkWriteQuota()) return@launch
+            val res = repository.createInstruction(
+                title = title,
+                body = body,
+                priority = priority,
+                departmentId = departmentId,
+                departmentName = departmentName,
+                academicYear = academicYear,
+                sectionName = sectionName,
+                governance = governance
+            )
+            _statusBanner.value = res.fold(
+                onSuccess = { "Instruction notice published." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Could not publish instruction.") }
+            )
+        }
+    }
+
+    fun deleteInstruction(instructionId: String) {
+        viewModelScope.launch {
+            if (_userRole.value == UserRole.STUDENT) return@launch
+            val res = repository.deleteInstruction(instructionId)
+            _statusBanner.value = res.fold(
+                onSuccess = { "Instruction deleted." },
+                onFailure = { InputValidator.safeUserErrorMessage(it, "Could not delete instruction.") }
+            )
+        }
+    }
+
+    fun sendSectionMessage(
+        departmentId: String?,
+        departmentName: String,
+        academicYear: String,
+        sectionName: String,
+        messageType: SectionMessageType,
+        pinned: Boolean,
+        rawText: String,
+        videoUrl: String? = null
+    ) {
+        viewModelScope.launch {
+            if (!checkWriteQuota()) return@launch
+            if (ProfanityFilter.containsProfanity(rawText)) {
+                governance.logAuditEvent(
+                    "PROFANITY_BLOCKED",
+                    AuditSeverity.WARN,
+                    "section_messages",
+                    "Blocked abusive section message."
+                )
+                _statusBanner.value = "تم حظر الإرسال لاحتواء النص على ألفاظ غير لائقة."
+                return@launch
+            }
+            val res = repository.sendSectionMessage(
+                departmentId = departmentId,
+                departmentName = departmentName,
+                academicYear = academicYear,
+                sectionName = sectionName,
+                senderRole = _userRole.value,
+                messageType = messageType,
+                pinned = pinned,
+                rawText = rawText,
+                videoUrl = videoUrl,
+                governance = governance
+            )
+            res.onFailure { err ->
+                _statusBanner.value = InputValidator.safeUserErrorMessage(err, err.message ?: "Could not post section message.")
+            }
+        }
+    }
+
+    fun deleteSectionMessage(messageId: String) {
+        viewModelScope.launch {
+            val res = repository.deleteSectionMessage(messageId)
+            res.onFailure { err ->
+                _statusBanner.value = InputValidator.safeUserErrorMessage(err, "Could not delete section message.")
+            }
+        }
+    }
+
     fun sendBroadcastNotification(title: String, body: String, category: NotificationCategory) {
         viewModelScope.launch {
             if (_userRole.value == UserRole.STUDENT) return@launch
@@ -1487,7 +1912,9 @@ class UniCoreViewModel(
         dailyAiLimit: Long,
         dailyWriteLimit: Long,
         aiEnabled: Boolean,
-        zeroCostLockActive: Boolean
+        zeroCostLockActive: Boolean,
+        tutorialVideoUrl: String? = null,
+        tutorialVideoTitle: String? = null
     ) {
         viewModelScope.launch {
             if (_userRole.value != UserRole.SUPER_ADMIN) {
@@ -1504,11 +1931,13 @@ class UniCoreViewModel(
                 dailyAiLimit = dailyAiLimit,
                 dailyWriteLimit = dailyWriteLimit,
                 aiEnabled = aiEnabled,
-                zeroCostLockActive = zeroCostLockActive
+                zeroCostLockActive = zeroCostLockActive,
+                tutorialVideoUrl = tutorialVideoUrl,
+                tutorialVideoTitle = tutorialVideoTitle
             )
             _statusBanner.value = result.fold(
                 onSuccess = { "Settings saved." },
-                onFailure = { InputValidator.safeUserErrorMessage(it, "Failed to update settings.") }
+                onFailure = { InputValidator.safeUserErrorMessage(it, it.message ?: "Failed to update settings.") }
             )
         }
     }

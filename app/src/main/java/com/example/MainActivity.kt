@@ -18,13 +18,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.Assignment
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.DarkMode
-import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Notifications
@@ -39,6 +41,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -79,6 +82,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.data.model.AcademicScopeFilter
 import com.example.data.model.UserRole
 import com.example.data.preferences.AppLanguage
 import com.example.data.preferences.AppThemeMode
@@ -99,11 +103,13 @@ import com.example.ui.i18n.UniCoreStrings
 import com.example.ui.i18n.stringsFor
 import com.example.ui.screens.AiTutorScreen
 import com.example.ui.screens.AuthScreen
+import com.example.ui.screens.CampusHubScreen
 import com.example.ui.screens.CoursesScreen
 import com.example.ui.screens.InAppFilePreviewDialog
+import com.example.ui.screens.MyDueAssignmentsScreen
 import com.example.ui.screens.NotificationsSheet
+import com.example.ui.screens.OnboardingPlacementDialog
 import com.example.ui.screens.QuizzesScreen
-import com.example.ui.screens.SecureFilesVaultScreen
 import com.example.ui.screens.SecurityConsoleScreen
 import com.example.ui.screens.StudyChatScreen
 import com.example.ui.theme.UniCoreTheme
@@ -160,21 +166,32 @@ private enum class UniCoreTab(
     val testTag: String
 ) {
     COURSES(Icons.Default.School, "tab_courses"),
-    QUIZZES(Icons.Default.Quiz, "tab_quizzes"),
+    DUE(Icons.Default.Assignment, "tab_due"),
+    CAMPUS(Icons.Default.CalendarMonth, "tab_campus"),
     CHAT(Icons.Default.Forum, "tab_chat"),
+    QUIZZES(Icons.Default.Quiz, "tab_quizzes"),
     AI_TUTOR(Icons.Default.AutoAwesome, "tab_ai_tutor"),
-    VAULT(Icons.Default.FolderSpecial, "tab_vault"),
     ACCOUNT(Icons.Default.Person, "tab_security");
 
     fun label(strings: UniCoreStrings): String = when (this) {
         COURSES -> strings.navCourses
-        QUIZZES -> strings.navQuizzes
+        DUE -> strings.navDue
+        CAMPUS -> strings.navCampus
         CHAT -> strings.navChat
+        QUIZZES -> strings.navQuizzes
         AI_TUTOR -> strings.navTutor
-        VAULT -> strings.navFiles
         ACCOUNT -> strings.navAccount
     }
 }
+
+private val CompactBottomTabs = listOf(
+    UniCoreTab.COURSES,
+    UniCoreTab.DUE,
+    UniCoreTab.CAMPUS,
+    UniCoreTab.CHAT,
+    UniCoreTab.QUIZZES,
+    UniCoreTab.AI_TUTOR
+)
 
 @Composable
 fun UniCoreApp(
@@ -266,6 +283,7 @@ private fun UniCoreAuthenticatedShell(
 
     var selectedTab by remember { mutableStateOf(UniCoreTab.COURSES) }
     var showNotificationsSheet by remember { mutableStateOf(false) }
+    var showPlacementEditor by remember { mutableStateOf(false) }
     var isTakingQuiz by remember { mutableStateOf(false) }
 
     LaunchedEffect(selectedTab) {
@@ -306,6 +324,11 @@ private fun UniCoreAuthenticatedShell(
     val inAppPreviewFile by viewModel.inAppPreviewFile.collectAsStateWithLifecycle()
     val selectedChatRoomId by viewModel.selectedChatRoomId.collectAsStateWithLifecycle()
     val chatMessagesState by viewModel.chatMessagesState.collectAsStateWithLifecycle()
+    val assignmentsState by viewModel.assignmentsState.collectAsStateWithLifecycle()
+    val scheduleItemsState by viewModel.scheduleItemsState.collectAsStateWithLifecycle()
+    val zoomSessionsState by viewModel.zoomSessionsState.collectAsStateWithLifecycle()
+    val instructionsState by viewModel.instructionsState.collectAsStateWithLifecycle()
+    val sectionMessagesState by viewModel.sectionMessagesState.collectAsStateWithLifecycle()
 
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(userProfile?.banUntilMillis) {
@@ -350,7 +373,7 @@ private fun UniCoreAuthenticatedShell(
     // Dispatch local tray notifications only for newly incoming unread alerts after initial snapshot seed
     val seenNotificationIds = remember(currentUserId) { mutableSetOf<String>() }
     var initializedNotifications by remember(currentUserId) { mutableStateOf(false) }
-    LaunchedEffect(notificationsState, prefs.systemNotificationsEnabled) {
+    LaunchedEffect(notificationsState, prefs.systemNotificationsEnabled, prefs.notificationSoundEnabled) {
         val currentList = (notificationsState as? UiState.Success)?.data ?: return@LaunchedEffect
         if (!initializedNotifications) {
             seenNotificationIds.addAll(currentList.map { it.id })
@@ -368,9 +391,57 @@ private fun UniCoreAuthenticatedShell(
                         context = context,
                         notificationIdKey = alert.id,
                         title = alert.title,
-                        body = alert.body
+                        body = alert.body,
+                        soundEnabled = prefs.notificationSoundEnabled
                     )
                 }
+        }
+    }
+
+    // Schedule 24-hour-before-deadline local reminders for upcoming incomplete assignments
+    LaunchedEffect(
+        assignmentsState,
+        userProfile?.completedAssignmentIds,
+        userProfile?.departmentId,
+        userProfile?.academicYear,
+        userProfile?.sectionName,
+        prefs.systemNotificationsEnabled,
+        prefs.scheduledReminderIds
+    ) {
+        val list = (assignmentsState as? UiState.Success)?.data ?: return@LaunchedEffect
+        val completedIds = userProfile?.completedAssignmentIds?.toSet() ?: emptySet()
+        val now = System.currentTimeMillis()
+        list.forEach { assignment ->
+            if (assignment.id in completedIds) {
+                UniCoreNotificationManager.cancelAssignmentReminder24h(context, assignment.id)
+                return@forEach
+            }
+            val inScope = AcademicScopeFilter.matchesStudentScope(
+                profile = userProfile,
+                itemDepartmentId = assignment.departmentId,
+                itemDepartmentName = assignment.departmentName,
+                itemAcademicYear = assignment.academicYear,
+                itemSectionName = assignment.sectionName
+            )
+            if (prefs.systemNotificationsEnabled &&
+                inScope &&
+                assignment.dueAtMillis > now &&
+                assignment.id !in prefs.scheduledReminderIds
+            ) {
+                val reminderBody = listOfNotNull(
+                    assignment.courseTitle?.takeIf { it.isNotBlank() },
+                    assignment.description.takeIf { it.isNotBlank() }
+                ).joinToString(" • ").ifBlank { strings.dueSoonBadge }
+                UniCoreNotificationManager.scheduleAssignmentReminder24h(
+                    context = context,
+                    assignmentId = assignment.id,
+                    title = "⏰ ${strings.dueSoonBadge}: ${assignment.title}",
+                    body = reminderBody,
+                    dueAtMillis = assignment.dueAtMillis,
+                    nowMillis = now
+                )
+                prefsRepository.markReminderScheduled(assignment.id)
+            }
         }
     }
 
@@ -389,6 +460,20 @@ private fun UniCoreAuthenticatedShell(
         UserRole.STUDENT -> strings.roleStudent
     }
 
+    val placementLine = remember(userProfile) {
+        listOfNotNull(
+            userProfile?.departmentName?.takeIf { it.isNotBlank() },
+            userProfile?.academicYear?.takeIf { it.isNotBlank() },
+            userProfile?.sectionName?.takeIf { it.isNotBlank() }
+        ).joinToString(" • ")
+    }
+
+    val needsFirstTimePlacement = remember(userProfile, userRole) {
+        val p = userProfile
+        p != null && userRole == UserRole.STUDENT &&
+            (!p.placementCompleted || p.academicYear.isNullOrBlank() || p.sectionName.isNullOrBlank())
+    }
+
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useNavigationRail = maxWidth >= 600.dp
 
@@ -397,11 +482,26 @@ private fun UniCoreAuthenticatedShell(
             topBar = {
                 TopAppBar(
                     title = {
-                        Text(
-                            text = "${strings.appName} • $localizedRole",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Column(
+                            modifier = Modifier.clickable { showPlacementEditor = true }
+                        ) {
+                            Text(
+                                text = "${strings.appName} • $localizedRole",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (placementLine.isNotBlank()) {
+                                Text(
+                                    text = placementLine,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
                     },
                     actions = {
                         TextButton(
@@ -451,6 +551,30 @@ private fun UniCoreAuthenticatedShell(
                                 )
                             }
                         }
+
+                        if (!useNavigationRail) {
+                            IconButton(
+                                onClick = { selectedTab = UniCoreTab.ACCOUNT },
+                                colors = IconButtonDefaults.iconButtonColors(
+                                    containerColor = if (selectedTab == UniCoreTab.ACCOUNT) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surface
+                                    }
+                                ),
+                                modifier = Modifier.testTag(UniCoreTab.ACCOUNT.testTag)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Person,
+                                    contentDescription = strings.navAccount,
+                                    tint = if (selectedTab == UniCoreTab.ACCOUNT) {
+                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    }
+                                )
+                            }
+                        }
                     }
                 )
             },
@@ -462,7 +586,7 @@ private fun UniCoreAuthenticatedShell(
                     }
                     if (!useNavigationRail) {
                         NavigationBar {
-                            UniCoreTab.entries.forEach { tab ->
+                            CompactBottomTabs.forEach { tab ->
                                 val label = tab.label(strings)
                                 NavigationBarItem(
                                     selected = selectedTab == tab,
@@ -478,7 +602,7 @@ private fun UniCoreAuthenticatedShell(
                                             text = label,
                                             maxLines = 1,
                                             softWrap = false,
-                                            fontSize = 11.sp,
+                                            fontSize = 10.sp,
                                             overflow = TextOverflow.Ellipsis
                                         )
                                     },
@@ -528,6 +652,7 @@ private fun UniCoreAuthenticatedShell(
                                 departmentsState = departmentsState,
                                 driveFoldersState = driveFoldersState,
                                 driveFilesState = driveFilesState,
+                                filesState = filesState,
                                 isDriveRefreshing = isDriveRefreshing,
                                 downloadedDriveFileIds = downloadedDriveFileIds,
                                 downloadingOfflineIds = downloadingOfflineIds,
@@ -535,9 +660,21 @@ private fun UniCoreAuthenticatedShell(
                                 openingCourseId = openingCourseId,
                                 openingDriveFileId = openingDriveFileId,
                                 userRole = userRole,
-                                onCreateCourseWithFile = { title, desc, link, type, uri, deptId, deptName, year ->
+                                userProfile = userProfile,
+                                onCreateCourseWithFile = { title, desc, link, type, uri, deptId, deptName, year, section, videoUrl, videoTitle ->
                                     viewModel.createCourseWithOptionalFile(
-                                        context, title, desc, link, type, uri, deptId, deptName, year
+                                        context = context,
+                                        title = title,
+                                        description = desc,
+                                        materialLink = link,
+                                        materialType = type,
+                                        selectedFileUri = uri,
+                                        departmentId = deptId,
+                                        departmentName = deptName,
+                                        academicYear = year,
+                                        sectionName = section,
+                                        videoUrl = videoUrl,
+                                        videoTitle = videoTitle
                                     )
                                 },
                                 onUpdateCourseDetails = viewModel::updateCourseDetails,
@@ -545,6 +682,9 @@ private fun UniCoreAuthenticatedShell(
                                 onOpenCourseAttachment = { course ->
                                     viewModel.openCourseAttachment(context, course)
                                 },
+                                onToggleFavoriteCourse = viewModel::toggleFavoriteCourse,
+                                onPickVaultFile = { uri -> viewModel.validateAndStoreFile(context, uri) },
+                                onDeleteVaultFile = { record -> viewModel.deleteVerifiedFile(context, record) },
                                 onSaveDepartment = viewModel::saveDepartment,
                                 onDeleteDepartment = viewModel::deleteDepartment,
                                 onLinkDriveFolder = viewModel::linkDriveFolder,
@@ -563,6 +703,105 @@ private fun UniCoreAuthenticatedShell(
                                 onDownloadAllOffline = { items ->
                                     viewModel.downloadAllDriveFilesOffline(context, items)
                                 }
+                            )
+                            UniCoreTab.DUE -> MyDueAssignmentsScreen(
+                                currentUserId = currentUserId,
+                                userRole = userRole,
+                                userProfile = userProfile,
+                                assignmentsState = assignmentsState,
+                                coursesState = coursesState,
+                                departmentsState = departmentsState,
+                                onToggleCompleted = viewModel::toggleAssignmentCompleted,
+                                onCreateAssignment = { title, desc, dueMs, courseId, courseTitle, deptId, deptName, year, section, classroomLink, videoUrl ->
+                                    viewModel.createAssignment(
+                                        title = title,
+                                        description = desc,
+                                        dueAtMillis = dueMs,
+                                        courseId = courseId,
+                                        courseTitle = courseTitle,
+                                        departmentId = deptId,
+                                        departmentName = deptName,
+                                        academicYear = year,
+                                        sectionName = section,
+                                        classroomLink = classroomLink,
+                                        videoUrl = videoUrl,
+                                        sourceType = "APP"
+                                    )
+                                },
+                                onImportClassroomTask = { title, courseTitle, dueMs, classroomUrl ->
+                                    viewModel.importClassroomAssignments(
+                                        items = listOf(Triple(title, courseTitle, dueMs)),
+                                        classroomLinks = listOf(classroomUrl),
+                                        courseTitles = listOf(courseTitle)
+                                    )
+                                },
+                                onDeleteAssignment = viewModel::deleteAssignment
+                            )
+                            UniCoreTab.CAMPUS -> CampusHubScreen(
+                                userRole = userRole,
+                                userProfile = userProfile,
+                                systemSettings = systemSettings,
+                                departmentsState = departmentsState,
+                                scheduleItemsState = scheduleItemsState,
+                                zoomSessionsState = zoomSessionsState,
+                                instructionsState = instructionsState,
+                                onCreateScheduleItem = { title, type, day, startTxt, endTxt, location, instructor, deptId, deptName, year, section, courseId, videoUrl ->
+                                    viewModel.createScheduleItem(
+                                        title = title,
+                                        itemType = type,
+                                        dayOfWeek = day,
+                                        startTimeText = startTxt,
+                                        endTimeText = endTxt,
+                                        locationOrMode = location,
+                                        instructorName = instructor,
+                                        departmentId = deptId,
+                                        departmentName = deptName,
+                                        academicYear = year,
+                                        sectionName = section,
+                                        courseId = courseId,
+                                        videoUrl = videoUrl
+                                    )
+                                },
+                                onDeleteScheduleItem = viewModel::deleteScheduleItem,
+                                onCreateZoomSession = { title, topic, url, scheduledMs, durationMins, deptId, deptName, year, section ->
+                                    viewModel.createZoomSession(
+                                        title = title,
+                                        topic = topic,
+                                        zoomUrl = url,
+                                        scheduledAtMillis = scheduledMs,
+                                        durationMinutes = durationMins,
+                                        departmentId = deptId,
+                                        departmentName = deptName,
+                                        academicYear = year,
+                                        sectionName = section
+                                    )
+                                },
+                                onDeleteZoomSession = viewModel::deleteZoomSession,
+                                onCreateInstruction = viewModel::createInstruction,
+                                onDeleteInstruction = viewModel::deleteInstruction
+                            )
+                            UniCoreTab.CHAT -> StudyChatScreen(
+                                currentUserId = currentUserId,
+                                userRole = userRole,
+                                userProfile = userProfile,
+                                departmentsState = departmentsState,
+                                selectedRoomId = selectedChatRoomId,
+                                messagesState = chatMessagesState,
+                                sectionMessagesState = sectionMessagesState,
+                                onSelectRoom = viewModel::selectChatRoom,
+                                onSendMessage = { roomId, deptName, yearLabel, text, imageUri ->
+                                    viewModel.sendChatMessage(
+                                        context = context,
+                                        roomId = roomId,
+                                        departmentName = deptName,
+                                        academicYear = yearLabel,
+                                        rawText = text,
+                                        imageUri = imageUri
+                                    )
+                                },
+                                onDeleteMessage = viewModel::deleteChatMessage,
+                                onSendSectionMessage = viewModel::sendSectionMessage,
+                                onDeleteSectionMessage = viewModel::deleteSectionMessage
                             )
                             UniCoreTab.QUIZZES -> QuizzesScreen(
                                 currentUserId = currentUserId,
@@ -592,25 +831,6 @@ private fun UniCoreAuthenticatedShell(
                                 onLoadQuizImage = viewModel::fetchQuizImageBytes,
                                 onQuizActiveChanged = { active -> isTakingQuiz = active }
                             )
-                            UniCoreTab.CHAT -> StudyChatScreen(
-                                currentUserId = currentUserId,
-                                userRole = userRole,
-                                departmentsState = departmentsState,
-                                selectedRoomId = selectedChatRoomId,
-                                messagesState = chatMessagesState,
-                                onSelectRoom = viewModel::selectChatRoom,
-                                onSendMessage = { roomId, deptName, yearLabel, text, imageUri ->
-                                    viewModel.sendChatMessage(
-                                        context = context,
-                                        roomId = roomId,
-                                        departmentName = deptName,
-                                        academicYear = yearLabel,
-                                        rawText = text,
-                                        imageUri = imageUri
-                                    )
-                                },
-                                onDeleteMessage = viewModel::deleteChatMessage
-                            )
                             UniCoreTab.AI_TUTOR -> AiTutorScreen(
                                 aiState = aiUiState,
                                 quotaSnapshot = quotaSnapshot,
@@ -621,11 +841,6 @@ private fun UniCoreAuthenticatedShell(
                                 onCancelTutor = viewModel::cancelAiTutor,
                                 onClearTutor = viewModel::clearAiState
                             )
-                            UniCoreTab.VAULT -> SecureFilesVaultScreen(
-                                filesState = filesState,
-                                onFilePicked = { uri -> viewModel.validateAndStoreFile(context, uri) },
-                                onDeleteFile = { record -> viewModel.deleteVerifiedFile(context, record) }
-                            )
                             UniCoreTab.ACCOUNT -> SecurityConsoleScreen(
                                 currentUserId = currentUserId,
                                 userRole = userRole,
@@ -635,6 +850,7 @@ private fun UniCoreAuthenticatedShell(
                                 currentLanguage = prefs.language,
                                 currentThemeMode = prefs.themeMode,
                                 systemNotificationsEnabled = prefs.systemNotificationsEnabled,
+                                notificationSoundEnabled = prefs.notificationSoundEnabled,
                                 auditLogsState = auditLogsState,
                                 usersDirectoryState = usersDirectoryState,
                                 roleInvitesState = roleInvitesState,
@@ -646,10 +862,19 @@ private fun UniCoreAuthenticatedShell(
                                 onSetSystemNotifications = { enabled ->
                                     scope.launch { prefsRepository.setSystemNotificationsEnabled(enabled) }
                                 },
+                                onSetNotificationSound = { enabled ->
+                                    scope.launch { prefsRepository.setNotificationSoundEnabled(enabled) }
+                                },
+                                onTestSound = {
+                                    UniCoreNotificationManager.playChimePreview(context)
+                                },
+                                onOpenPlacementEditor = { showPlacementEditor = true },
                                 onInviteAccount = viewModel::inviteAccountByEmail,
                                 onRevokeInvite = viewModel::revokeInvite,
                                 onPromoteUser = viewModel::promoteUserToAdmin,
+                                onPromoteSuperAdmin = viewModel::promoteUserToSuperAdmin,
                                 onDemoteAdmin = viewModel::demoteAdminToStudent,
+                                onDemoteSuperAdmin = viewModel::demoteSuperAdminToAdmin,
                                 onToggleAccountDisabled = viewModel::setUserAccountDisabled,
                                 onTimedBanUser = viewModel::setUserTimedBan,
                                 onSendSupportMessage = { subject, body, imageUri ->
@@ -666,6 +891,20 @@ private fun UniCoreAuthenticatedShell(
                 }
             }
         }
+    }
+
+    if (needsFirstTimePlacement || showPlacementEditor) {
+        val departments = (departmentsState as? UiState.Success)?.data.orEmpty()
+        OnboardingPlacementDialog(
+            userProfile = userProfile,
+            departments = departments,
+            isBlockingFirstTime = needsFirstTimePlacement && !showPlacementEditor,
+            onDismiss = { showPlacementEditor = false },
+            onSavePlacement = { deptId, deptName, year, section ->
+                viewModel.saveAcademicPlacement(deptId, deptName, year, section)
+                showPlacementEditor = false
+            }
+        )
     }
 
     val activePreview = inAppPreviewFile

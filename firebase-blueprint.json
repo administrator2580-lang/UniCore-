@@ -27,7 +27,7 @@
     },
     "SystemSettings": {
       "title": "SystemSettings",
-      "description": "Global zero-cost quota caps and security toggles manageable only by Super Admin.",
+      "description": "Global zero-cost quota caps, tutorial video config, and security toggles manageable only by Super Admin.",
       "type": "object",
       "properties": {
         "dailyAiLimitPerUser": { "type": "integer", "description": "Max free-tier AI tutor calls per user per day." },
@@ -35,6 +35,8 @@
         "maxFileUploadBytes": { "type": "integer", "description": "Max validated file size in bytes (<= 5MB)." },
         "aiEnabled": { "type": "boolean", "description": "Global switch to pause AI features when approaching free-tier quota." },
         "zeroCostLockActive": { "type": "boolean", "description": "Forces read-only safe mode if Spark free-tier limit is reached." },
+        "tutorialVideoUrl": { "type": "string", "description": "HTTPS URL for app usage tutorial video." },
+        "tutorialVideoTitle": { "type": "string", "description": "Display title for app usage tutorial video." },
         "updatedBy": { "type": "string", "description": "Super Admin UID." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
@@ -48,11 +50,21 @@
       "properties": {
         "userId": { "type": "string", "description": "Firebase Auth UID." },
         "displayName": { "type": "string", "description": "Sanitized display name." },
-        "role": { "type": "string", "enum": ["STUDENT", "ADMIN", "SUPER_ADMIN"], "description": "RBAC role." },
+        "role": { "type": "string", "enum": ["STUDENT", "ADMIN", "SUPER_ADMIN", "super_admin"], "description": "RBAC role." },
         "aiCallsToday": { "type": "integer", "description": "Daily AI Logic usage counter." },
         "writesToday": { "type": "integer", "description": "Daily Firestore write counter." },
         "quotaDayKey": { "type": "string", "description": "UTC date string YYYY-MM-DD for quota reset." },
         "accountDisabled": { "type": "boolean", "description": "If true, account is temporarily suspended by Super Admin without deletion." },
+        "banUntilMillis": { "type": "integer", "description": "Epoch millis until temporary ban expires." },
+        "banReason": { "type": "string", "description": "Optional reason for ban." },
+        "departmentId": { "type": "string", "description": "Selected academic department ID." },
+        "departmentName": { "type": "string", "description": "Selected academic department name." },
+        "academicYear": { "type": "string", "description": "Selected academic year." },
+        "sectionName": { "type": "string", "description": "Selected student section name." },
+        "placementCompleted": { "type": "boolean", "description": "Whether student completed initial year/section onboarding." },
+        "favoriteCourseIds": { "type": "array", "description": "Bounded list of user favorite course IDs." },
+        "completedAssignmentIds": { "type": "array", "description": "Bounded list of assignment IDs marked completed by user." },
+        "classroomConnected": { "type": "boolean", "description": "Whether Google Classroom integration was linked." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
       },
@@ -89,7 +101,7 @@
     },
     "Course": {
       "title": "Course",
-      "description": "Educational course with direct attached PDF/image files or HTTPS study resource links.",
+      "description": "Educational course with direct attached PDF/image files, lecture videos, or HTTPS study resource links.",
       "type": "object",
       "properties": {
         "title": { "type": "string" },
@@ -107,6 +119,9 @@
         "departmentId": { "type": "string" },
         "departmentName": { "type": "string" },
         "academicYear": { "type": "string" },
+        "sectionName": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "videoTitle": { "type": "string" },
         "published": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -155,6 +170,121 @@
       },
       "required": ["name", "years", "createdBy", "createdAt", "updatedAt"]
     },
+    "AssignmentItem": {
+      "title": "AssignmentItem",
+      "description": "Academic assignment or Google Classroom coursework item scoped by year/section or user.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "courseId": { "type": "string" },
+        "courseTitle": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "academicYear": { "type": "string" },
+        "sectionName": { "type": "string" },
+        "dueAtMillis": { "type": "integer" },
+        "classroomLink": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "sourceType": { "type": "string", "enum": ["APP", "CLASSROOM"] },
+        "ownerUid": { "type": "string" },
+        "published": { "type": "boolean" },
+        "createdBy": { "type": "string" },
+        "createdByName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "description", "dueAtMillis", "sourceType", "ownerUid", "published", "createdBy", "createdByName", "createdAt", "updatedAt"]
+    },
+    "ScheduleItem": {
+      "title": "ScheduleItem",
+      "description": "Lecture, section, assignment, or exam timetable entry per academic year and section.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "itemType": { "type": "string", "enum": ["LECTURE", "SECTION", "ASSIGNMENT", "EXAM"] },
+        "dayOfWeek": { "type": "integer" },
+        "startTimeText": { "type": "string" },
+        "endTimeText": { "type": "string" },
+        "locationOrMode": { "type": "string" },
+        "instructorName": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "academicYear": { "type": "string" },
+        "sectionName": { "type": "string" },
+        "courseId": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "dueAtMillis": { "type": "integer" },
+        "published": { "type": "boolean" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "itemType", "dayOfWeek", "startTimeText", "endTimeText", "locationOrMode", "published", "createdBy", "createdAt", "updatedAt"]
+    },
+    "ZoomSession": {
+      "title": "ZoomSession",
+      "description": "Live online lecture / Zoom session link scoped by academic year and section.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "topic": { "type": "string" },
+        "zoomUrl": { "type": "string" },
+        "scheduledAtMillis": { "type": "integer" },
+        "durationMinutes": { "type": "integer" },
+        "hostName": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "academicYear": { "type": "string" },
+        "sectionName": { "type": "string" },
+        "courseId": { "type": "string" },
+        "published": { "type": "boolean" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "zoomUrl", "scheduledAtMillis", "durationMinutes", "hostName", "published", "createdBy", "createdAt", "updatedAt"]
+    },
+    "InstructionNotice": {
+      "title": "InstructionNotice",
+      "description": "General or year/section targeted academic instructions ('تعليمات للكل').",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "priority": { "type": "string", "enum": ["NORMAL", "IMPORTANT", "PINNED"] },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "academicYear": { "type": "string" },
+        "sectionName": { "type": "string" },
+        "published": { "type": "boolean" },
+        "createdBy": { "type": "string" },
+        "createdByName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "body", "priority", "published", "createdBy", "createdByName", "createdAt", "updatedAt"]
+    },
+    "SectionMessage": {
+      "title": "SectionMessage",
+      "description": "Dedicated per-section announcement or student message.",
+      "type": "object",
+      "properties": {
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "academicYear": { "type": "string" },
+        "sectionName": { "type": "string" },
+        "senderUid": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderRole": { "type": "string", "enum": ["STUDENT", "ADMIN", "SUPER_ADMIN"] },
+        "messageType": { "type": "string", "enum": ["NOTICE", "MESSAGE"] },
+        "isPinned": { "type": "boolean" },
+        "text": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["departmentName", "academicYear", "sectionName", "senderUid", "senderName", "senderRole", "messageType", "text", "createdAt"]
+    },
     "Quiz": {
       "title": "Quiz",
       "description": "Published quiz questions without answer keys.",
@@ -196,7 +326,7 @@
         "quizId": { "type": "string" },
         "quizTitle": { "type": "string" },
         "selectedIndices": { "type": "array" },
-        "status": { "type": "string", "enum": ["SUBMITTED", "GRADED"] },
+        "status": { "type": "string", "enum": ["SUBMITTED", "GRADED", "CANCELLED_VIOLATION"] },
         "score": { "type": "integer" },
         "graded": { "type": "boolean" },
         "gradedBy": { "type": "string" },
@@ -222,12 +352,12 @@
     },
     "RoleInvite": {
       "title": "RoleInvite",
-      "description": "Email-based Student/Admin account pre-registration and role invite stored in /role_invites/{emailKey}.",
+      "description": "Email-based Student/Admin/SuperAdmin account pre-registration stored in /role_invites/{emailKey}.",
       "type": "object",
       "properties": {
         "email": { "type": "string" },
         "displayNameHint": { "type": "string" },
-        "assignedRole": { "type": "string", "enum": ["STUDENT", "ADMIN"] },
+        "assignedRole": { "type": "string", "enum": ["STUDENT", "ADMIN", "SUPER_ADMIN"] },
         "invitedBy": { "type": "string" },
         "invitedByLabel": { "type": "string" },
         "status": { "type": "string", "enum": ["PENDING", "CLAIMED"] },
@@ -244,7 +374,7 @@
       "properties": {
         "title": { "type": "string" },
         "body": { "type": "string" },
-        "category": { "type": "string", "enum": ["COURSE", "QUIZ", "GRADE", "ROLE", "SECURITY", "ANNOUNCEMENT"] },
+        "category": { "type": "string", "enum": ["COURSE", "QUIZ", "GRADE", "ROLE", "SECURITY", "ANNOUNCEMENT", "ASSIGNMENT", "ZOOM"] },
         "targetUid": { "type": "string" },
         "senderUid": { "type": "string" },
         "senderName": { "type": "string" },
@@ -284,11 +414,11 @@
     },
     "/system_settings/{settingId}": {
       "schema": { "$ref": "#/entities/SystemSettings" },
-      "description": "Global zero-cost limits and security toggles."
+      "description": "Global zero-cost limits, tutorial config, and security toggles."
     },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "User profile and daily quota counters."
+      "description": "User profile, placement, favorites, and daily quota counters."
     },
     "/users/{userId}/private/{docId}": {
       "schema": { "$ref": "#/entities/UserPrivatePii" },
@@ -314,6 +444,26 @@
       "schema": { "$ref": "#/entities/AcademicDepartment" },
       "description": "Academic departments and years/levels writable only by Admins and Super Admins."
     },
+    "/assignments/{assignmentId}": {
+      "schema": { "$ref": "#/entities/AssignmentItem" },
+      "description": "Academic assignments and Classroom items."
+    },
+    "/schedule_items/{itemId}": {
+      "schema": { "$ref": "#/entities/ScheduleItem" },
+      "description": "Per-section weekly lecture and assignment timetable."
+    },
+    "/zoom_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/ZoomSession" },
+      "description": "Live Zoom lecture links scoped by year and section."
+    },
+    "/instructions/{instructionId}": {
+      "schema": { "$ref": "#/entities/InstructionNotice" },
+      "description": "General or targeted academic instructions ('تعليمات للكل')."
+    },
+    "/section_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/SectionMessage" },
+      "description": "Per-section notices and discussion messages."
+    },
     "/quizzes/{quizId}": {
       "schema": { "$ref": "#/entities/Quiz" },
       "description": "Quizzes without answer keys."
@@ -332,7 +482,7 @@
     },
     "/role_invites/{inviteId}": {
       "schema": { "$ref": "#/entities/RoleInvite" },
-      "description": "Email-keyed Student and Admin pre-registrations."
+      "description": "Email-keyed Student, Admin, and Super Admin pre-registrations."
     },
     "/notifications/{notificationId}": {
       "schema": { "$ref": "#/entities/UniNotification" },

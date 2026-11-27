@@ -51,6 +51,10 @@
             </intent-filter>
         </activity>
 
+        <receiver
+            android:name=".notifications.AssignmentReminderReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

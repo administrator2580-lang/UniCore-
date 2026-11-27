@@ -4,17 +4,25 @@ import android.content.Context
 import com.example.R
 import com.example.data.OperationType
 import com.example.data.handleFirestoreError
+import com.example.data.model.AssignmentItem
 import com.example.data.model.AuditSeverity
 import com.example.data.model.Course
+import com.example.data.model.InstructionNotice
+import com.example.data.model.InstructionPriority
 import com.example.data.model.MaterialType
 import com.example.data.model.NotificationCategory
 import com.example.data.model.Quiz
 import com.example.data.model.QuizAnswerKey
 import com.example.data.model.QuizAttempt
 import com.example.data.model.RoleInvite
+import com.example.data.model.ScheduleItem
+import com.example.data.model.ScheduleItemType
+import com.example.data.model.SectionMessage
+import com.example.data.model.SectionMessageType
 import com.example.data.model.UserProfile
 import com.example.data.model.UserRole
 import com.example.data.model.VerifiedFileRecord
+import com.example.data.model.ZoomSession
 import com.example.security.ImageAttachmentHelper
 import com.example.security.InputValidator
 import com.example.security.ProfanityFilter
@@ -128,10 +136,13 @@ class UniCoreRepository(
                 )
             }
 
-            val hasPendingAdminInvite = pendingInvite?.assignedRole == UserRole.ADMIN.name
+            val hasPendingSuperAdminInvite =
+                pendingInvite?.assignedRole.equals(UserRole.SUPER_ADMIN.name, ignoreCase = true)
+            val hasPendingAdminInvite =
+                pendingInvite?.assignedRole.equals(UserRole.ADMIN.name, ignoreCase = true)
 
             val resolvedRole = when {
-                isBootstrappedSuperAdmin || hasSuperAdminDoc -> UserRole.SUPER_ADMIN
+                isBootstrappedSuperAdmin || hasSuperAdminDoc || hasPendingSuperAdminInvite -> UserRole.SUPER_ADMIN
                 hasAdminDoc || hasPendingAdminInvite -> UserRole.ADMIN
                 else -> UserRole.STUDENT
             }
@@ -168,8 +179,17 @@ class UniCoreRepository(
                 }
             }
 
-            // Step 1: If user has a PENDING ADMIN invite, create /admins/{uid} while invite is still PENDING
-            if (hasPendingAdminInvite && !hasAdminDoc && pendingInvite != null && !normalizedEmail.isNullOrBlank()) {
+            // Step 1: If user has a PENDING SUPER_ADMIN or ADMIN invite, create registry doc while invite is still PENDING
+            if (hasPendingSuperAdminInvite && !hasSuperAdminDoc && pendingInvite != null && !normalizedEmail.isNullOrBlank()) {
+                db.collection("super_admins").document(uid).set(
+                    mapOf(
+                        "userId" to uid,
+                        "email" to normalizedEmail,
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            } else if (hasPendingAdminInvite && !hasAdminDoc && pendingInvite != null && !normalizedEmail.isNullOrBlank()) {
                 db.collection("admins").document(uid).set(
                     mapOf(
                         "userId" to uid,
@@ -205,7 +225,7 @@ class UniCoreRepository(
                 ).await()
             } else if (userSnap != null && userSnap.exists()) {
                 val existingDay = userSnap.getString("quotaDayKey") ?: ""
-                val existingRole = userSnap.getString("role") ?: UserRole.STUDENT.name
+                val existingRole = UserRole.fromRaw(userSnap.getString("role"))
                 val updates = mutableMapOf<String, Any>(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -214,7 +234,9 @@ class UniCoreRepository(
                     updates["writesToday"] = 0L
                     updates["quotaDayKey"] = today
                 }
-                if (hasPendingAdminInvite && existingRole == UserRole.STUDENT.name) {
+                if (hasPendingSuperAdminInvite && existingRole != UserRole.SUPER_ADMIN) {
+                    updates["role"] = UserRole.SUPER_ADMIN.name
+                } else if (hasPendingAdminInvite && existingRole == UserRole.STUDENT) {
                     updates["role"] = UserRole.ADMIN.name
                 }
                 if (updates.size > 1) {
@@ -400,7 +422,10 @@ class UniCoreRepository(
         attachedFile: SecureFileValidator.ValidatedFile? = null,
         departmentId: String? = null,
         departmentName: String? = null,
-        academicYear: String? = null
+        academicYear: String? = null,
+        sectionName: String? = null,
+        videoUrl: String? = null,
+        videoTitle: String? = null
     ): Result<Unit> {
         var docPath = "courses"
         val docRef = db.collection("courses").document()
@@ -416,6 +441,10 @@ class UniCoreRepository(
                 is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
             }
             val cleanLink = when (val r = InputValidator.validateOptionalHttpsUrl(materialLink)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanVideoUrl = when (val r = InputValidator.validateOptionalHttpsUrl(videoUrl)) {
                 is InputValidator.ValidationResult.Valid -> r.value
                 is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
             }
@@ -475,6 +504,14 @@ class UniCoreRepository(
             }
             if (!academicYear.isNullOrBlank()) {
                 payload["academicYear"] = InputValidator.sanitizeText(academicYear).take(40)
+            }
+            if (!sectionName.isNullOrBlank()) {
+                payload["sectionName"] = InputValidator.sanitizeText(sectionName).take(40)
+            }
+            if (cleanVideoUrl != null) {
+                payload["videoUrl"] = cleanVideoUrl
+                val cleanVideoTitle = InputValidator.sanitizeText(videoTitle ?: "").take(120)
+                if (cleanVideoTitle.isNotBlank()) payload["videoTitle"] = cleanVideoTitle
             }
             if (attachedFile != null) {
                 payload["attachmentName"] = attachedFile.originalName.take(140)
@@ -538,7 +575,10 @@ class UniCoreRepository(
         description: String,
         departmentId: String?,
         departmentName: String?,
-        academicYear: String?
+        academicYear: String?,
+        sectionName: String? = null,
+        videoUrl: String? = null,
+        videoTitle: String? = null
     ): Result<Unit> {
         val docPath = "courses/$courseId"
         return try {
@@ -551,25 +591,38 @@ class UniCoreRepository(
                 is InputValidator.ValidationResult.Valid -> r.value
                 is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
             }
+            val cleanVideoUrl = when (val r = InputValidator.validateOptionalHttpsUrl(videoUrl)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
             val updates = mutableMapOf<String, Any>(
                 "title" to cleanTitle,
                 "description" to cleanDesc,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            if (!departmentId.isNullOrBlank()) {
-                updates["departmentId"] = departmentId
+            updates["departmentId"] = departmentId?.takeIf { it.isNotBlank() } ?: FieldValue.delete()
+            updates["departmentName"] = if (!departmentName.isNullOrBlank() && departmentName.length >= 2) {
+                InputValidator.sanitizeText(departmentName).take(80)
             } else {
-                updates["departmentId"] = FieldValue.delete()
+                FieldValue.delete()
             }
-            if (!departmentName.isNullOrBlank() && departmentName.length >= 2) {
-                updates["departmentName"] = InputValidator.sanitizeText(departmentName).take(80)
+            updates["academicYear"] = if (!academicYear.isNullOrBlank()) {
+                InputValidator.sanitizeText(academicYear).take(40)
             } else {
-                updates["departmentName"] = FieldValue.delete()
+                FieldValue.delete()
             }
-            if (!academicYear.isNullOrBlank()) {
-                updates["academicYear"] = InputValidator.sanitizeText(academicYear).take(40)
+            updates["sectionName"] = if (!sectionName.isNullOrBlank()) {
+                InputValidator.sanitizeText(sectionName).take(40)
             } else {
-                updates["academicYear"] = FieldValue.delete()
+                FieldValue.delete()
+            }
+            if (cleanVideoUrl != null) {
+                updates["videoUrl"] = cleanVideoUrl
+                val cleanVideoTitle = InputValidator.sanitizeText(videoTitle ?: "").take(120)
+                updates["videoTitle"] = if (cleanVideoTitle.isNotBlank()) cleanVideoTitle else FieldValue.delete()
+            } else {
+                updates["videoUrl"] = FieldValue.delete()
+                updates["videoTitle"] = FieldValue.delete()
             }
             db.collection("courses").document(courseId).update(updates).await()
             Result.success(Unit)
@@ -1096,6 +1149,698 @@ class UniCoreRepository(
                     localFile.delete()
                 }
             }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    // --- Academic Placement, Favorites & Personal Assignment Tracking ---
+
+    suspend fun saveUserAcademicPlacement(
+        departmentId: String?,
+        departmentName: String,
+        academicYear: String,
+        sectionName: String,
+        governance: UniCoreGovernanceRepository
+    ): Result<Unit> {
+        val cleanDept = when (val r = InputValidator.validateBoundedText(departmentName, "Department", 2, 80)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val cleanYear = when (val r = InputValidator.validateBoundedText(academicYear, "Academic Year", 1, 40)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val cleanSection = when (val r = InputValidator.validateBoundedText(sectionName, "Section", 1, 40)) {
+            is InputValidator.ValidationResult.Valid -> r.value
+            is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+        }
+        val uid = requireUserId()
+        val docPath = "users/$uid"
+        return try {
+            val updates = mutableMapOf<String, Any>(
+                "departmentName" to cleanDept,
+                "academicYear" to cleanYear,
+                "sectionName" to cleanSection,
+                "placementCompleted" to true,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (!departmentId.isNullOrBlank()) {
+                updates["departmentId"] = departmentId
+            } else {
+                updates["departmentId"] = ""
+            }
+            db.collection("users").document(uid).update(updates).await()
+            governance.logAuditEvent(
+                action = "USER_SECTION_UPDATED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Placement saved: $cleanDept / $cleanYear / $cleanSection"
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun toggleFavoriteCourse(courseId: String, currentFavorites: List<String>): Result<Unit> {
+        val uid = requireUserId()
+        val docPath = "users/$uid"
+        return try {
+            val updated = if (courseId in currentFavorites) {
+                currentFavorites.filterNot { it == courseId }
+            } else {
+                (currentFavorites + courseId).distinct().take(100)
+            }
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "favoriteCourseIds" to updated,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun toggleAssignmentCompleted(assignmentId: String, currentCompleted: List<String>): Result<Unit> {
+        val uid = requireUserId()
+        val docPath = "users/$uid"
+        return try {
+            val updated = if (assignmentId in currentCompleted) {
+                currentCompleted.filterNot { it == assignmentId }
+            } else {
+                (currentCompleted + assignmentId).distinct().take(200)
+            }
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "completedAssignmentIds" to updated,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun setClassroomConnected(connected: Boolean): Result<Unit> {
+        val uid = requireUserId()
+        val docPath = "users/$uid"
+        return try {
+            db.collection("users").document(uid).update(
+                mapOf(
+                    "classroomConnected" to connected,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    // --- Assignments ("اللي عليا" & Google Classroom) ---
+
+    fun observeAssignments(isAdmin: Boolean): Flow<List<AssignmentItem>> = flow {
+        val uid = requireUserId()
+        val path = "assignments"
+        val query = if (isAdmin) {
+            db.collection(path)
+        } else {
+            db.collection(path).whereIn("ownerUid", listOf("ALL", uid))
+        }
+        emitAll(
+            query.snapshots()
+                .map { snap ->
+                    snap.toObjects(AssignmentItem::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .filter { isAdmin || it.published }
+                        .sortedBy { if (it.dueAtMillis > 0L) it.dueAtMillis else Long.MAX_VALUE }
+                }
+                .catch { error ->
+                    unwrapAndLog(error, OperationType.LIST, path, uid)
+                    throw error
+                }
+        )
+    }
+
+    suspend fun createAssignment(
+        title: String,
+        description: String,
+        dueAtMillis: Long,
+        courseId: String? = null,
+        courseTitle: String? = null,
+        departmentId: String? = null,
+        departmentName: String? = null,
+        academicYear: String? = null,
+        sectionName: String? = null,
+        classroomLink: String? = null,
+        videoUrl: String? = null,
+        sourceType: String = "APP",
+        governance: UniCoreGovernanceRepository
+    ): Result<Unit> {
+        var docPath = "assignments"
+        return try {
+            val uid = requireUserId()
+            val cleanTitle = when (val r = InputValidator.validateBoundedText(title, "Assignment title", 2, 120)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            ProfanityFilter.assertCleanText(description)
+            if (InputValidator.containsInjectionPayload(description)) {
+                return Result.failure(IllegalArgumentException("Description contains disallowed syntax."))
+            }
+            val cleanDesc = InputValidator.sanitizeText(description).take(800)
+            val cleanClassroomLink = when (val r = InputValidator.validateOptionalHttpsUrl(classroomLink)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanVideoUrl = when (val r = InputValidator.validateOptionalHttpsUrl(videoUrl)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+
+            val isClassroomPersonal = sourceType == "CLASSROOM"
+            val creatorName = InputValidator.sanitizeText(auth.currentUser?.displayName ?: "Instructor")
+                .take(60).ifBlank { "Instructor" }.let { if (it.length < 2) "Instructor" else it }
+
+            val docRef = db.collection("assignments").document()
+            docPath = docRef.path
+            val payload = mutableMapOf<String, Any>(
+                "title" to cleanTitle,
+                "description" to cleanDesc,
+                "dueAtMillis" to dueAtMillis.coerceAtLeast(0L),
+                "sourceType" to if (isClassroomPersonal) "CLASSROOM" else "APP",
+                "ownerUid" to if (isClassroomPersonal) uid else "ALL",
+                "published" to true,
+                "createdBy" to uid,
+                "createdByName" to creatorName,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (!courseId.isNullOrBlank()) payload["courseId"] = courseId
+            if (!courseTitle.isNullOrBlank()) payload["courseTitle"] = InputValidator.sanitizeText(courseTitle).take(100)
+            if (!departmentId.isNullOrBlank()) payload["departmentId"] = departmentId
+            if (!departmentName.isNullOrBlank()) payload["departmentName"] = InputValidator.sanitizeText(departmentName).take(80)
+            if (!academicYear.isNullOrBlank()) payload["academicYear"] = InputValidator.sanitizeText(academicYear).take(40)
+            if (!sectionName.isNullOrBlank()) payload["sectionName"] = InputValidator.sanitizeText(sectionName).take(40)
+            if (cleanClassroomLink != null) payload["classroomLink"] = cleanClassroomLink
+            if (cleanVideoUrl != null) payload["videoUrl"] = cleanVideoUrl
+
+            docRef.set(payload).await()
+            incrementDailyCounter(uid, isAi = false)
+
+            governance.logAuditEvent(
+                action = "ASSIGNMENT_CREATED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Published assignment '$cleanTitle' (${payload["sourceType"]})."
+            )
+            if (!isClassroomPersonal) {
+                governance.sendNotification(
+                    title = cleanTitle,
+                    body = "New assignment posted${if (!courseTitle.isNullOrBlank()) " ($courseTitle)" else ""}. Check deadlines in UniCore.",
+                    category = NotificationCategory.ASSIGNMENT,
+                    targetUid = "ALL"
+                )
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteAssignment(assignmentId: String): Result<Unit> {
+        val docPath = "assignments/$assignmentId"
+        return try {
+            requireUserId()
+            db.collection("assignments").document(assignmentId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    // --- Section Schedule ---
+
+    fun observeScheduleItems(isAdmin: Boolean): Flow<List<ScheduleItem>> = flow {
+        val uid = requireUserId()
+        val path = "schedule_items"
+        val query = if (isAdmin) {
+            db.collection(path)
+        } else {
+            db.collection(path).whereEqualTo("published", true)
+        }
+        emitAll(
+            query.snapshots()
+                .map { snap ->
+                    snap.toObjects(ScheduleItem::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedWith(compareBy<ScheduleItem> { it.dayOfWeek }.thenBy { it.startTimeText })
+                }
+                .catch { error ->
+                    unwrapAndLog(error, OperationType.LIST, path, uid)
+                    throw error
+                }
+        )
+    }
+
+    suspend fun createScheduleItem(
+        title: String,
+        itemType: ScheduleItemType,
+        dayOfWeek: Int,
+        startTimeText: String,
+        endTimeText: String,
+        locationOrMode: String,
+        instructorName: String?,
+        departmentId: String?,
+        departmentName: String?,
+        academicYear: String?,
+        sectionName: String?,
+        courseId: String?,
+        videoUrl: String?,
+        dueAtMillis: Long = 0L,
+        governance: UniCoreGovernanceRepository
+    ): Result<Unit> {
+        var docPath = "schedule_items"
+        return try {
+            val uid = requireUserId()
+            val cleanTitle = when (val r = InputValidator.validateBoundedText(title, "Schedule title", 2, 120)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanStart = when (val r = InputValidator.validateBoundedText(startTimeText, "Start time", 1, 20)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanEnd = when (val r = InputValidator.validateBoundedText(endTimeText, "End time", 1, 20)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanLocation = when (val r = InputValidator.validateBoundedText(locationOrMode, "Location / Hall", 1, 100)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanVideo = when (val r = InputValidator.validateOptionalHttpsUrl(videoUrl)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+
+            val docRef = db.collection("schedule_items").document()
+            docPath = docRef.path
+            val payload = mutableMapOf<String, Any>(
+                "title" to cleanTitle,
+                "itemType" to itemType.name,
+                "dayOfWeek" to dayOfWeek.coerceIn(0, 6).toLong(),
+                "startTimeText" to cleanStart,
+                "endTimeText" to cleanEnd,
+                "locationOrMode" to cleanLocation,
+                "published" to true,
+                "createdBy" to uid,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (!instructorName.isNullOrBlank()) {
+                payload["instructorName"] = InputValidator.sanitizeText(instructorName).take(60)
+            }
+            if (!departmentId.isNullOrBlank()) payload["departmentId"] = departmentId
+            if (!departmentName.isNullOrBlank()) payload["departmentName"] = InputValidator.sanitizeText(departmentName).take(80)
+            if (!academicYear.isNullOrBlank()) payload["academicYear"] = InputValidator.sanitizeText(academicYear).take(40)
+            if (!sectionName.isNullOrBlank()) payload["sectionName"] = InputValidator.sanitizeText(sectionName).take(40)
+            if (!courseId.isNullOrBlank()) payload["courseId"] = courseId
+            if (cleanVideo != null) payload["videoUrl"] = cleanVideo
+            if (dueAtMillis > 0L) payload["dueAtMillis"] = dueAtMillis
+
+            docRef.set(payload).await()
+            incrementDailyCounter(uid, isAi = false)
+            governance.logAuditEvent(
+                action = "SCHEDULE_UPDATED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Added schedule entry '$cleanTitle' (${itemType.name})."
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteScheduleItem(itemId: String): Result<Unit> {
+        val docPath = "schedule_items/$itemId"
+        return try {
+            requireUserId()
+            db.collection("schedule_items").document(itemId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    // --- Live Zoom Sessions ---
+
+    fun observeZoomSessions(isAdmin: Boolean): Flow<List<ZoomSession>> = flow {
+        val uid = requireUserId()
+        val path = "zoom_sessions"
+        val query = if (isAdmin) {
+            db.collection(path)
+        } else {
+            db.collection(path).whereEqualTo("published", true)
+        }
+        emitAll(
+            query.snapshots()
+                .map { snap ->
+                    snap.toObjects(ZoomSession::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedBy { it.scheduledAtMillis }
+                }
+                .catch { error ->
+                    unwrapAndLog(error, OperationType.LIST, path, uid)
+                    throw error
+                }
+        )
+    }
+
+    suspend fun createZoomSession(
+        title: String,
+        topic: String,
+        zoomUrl: String,
+        scheduledAtMillis: Long,
+        durationMinutes: Int,
+        departmentId: String?,
+        departmentName: String?,
+        academicYear: String?,
+        sectionName: String?,
+        courseId: String?,
+        governance: UniCoreGovernanceRepository
+    ): Result<Unit> {
+        var docPath = "zoom_sessions"
+        return try {
+            val uid = requireUserId()
+            val cleanTitle = when (val r = InputValidator.validateBoundedText(title, "Session title", 2, 120)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanUrl = when (val r = InputValidator.validateOptionalHttpsUrl(zoomUrl)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                    ?: return Result.failure(IllegalArgumentException("Zoom meeting HTTPS URL is required."))
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            ProfanityFilter.assertCleanText(topic)
+            val cleanTopic = InputValidator.sanitizeText(topic).take(300)
+            val hostName = InputValidator.sanitizeText(auth.currentUser?.displayName ?: "Lecturer")
+                .take(60).ifBlank { "Lecturer" }.let { if (it.length < 2) "Host" else it }
+
+            val docRef = db.collection("zoom_sessions").document()
+            docPath = docRef.path
+            val payload = mutableMapOf<String, Any>(
+                "title" to cleanTitle,
+                "zoomUrl" to cleanUrl,
+                "scheduledAtMillis" to scheduledAtMillis.coerceAtLeast(0L),
+                "durationMinutes" to durationMinutes.coerceIn(5, 360).toLong(),
+                "hostName" to hostName,
+                "published" to true,
+                "createdBy" to uid,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (cleanTopic.isNotBlank()) payload["topic"] = cleanTopic
+            if (!departmentId.isNullOrBlank()) payload["departmentId"] = departmentId
+            if (!departmentName.isNullOrBlank()) payload["departmentName"] = InputValidator.sanitizeText(departmentName).take(80)
+            if (!academicYear.isNullOrBlank()) payload["academicYear"] = InputValidator.sanitizeText(academicYear).take(40)
+            if (!sectionName.isNullOrBlank()) payload["sectionName"] = InputValidator.sanitizeText(sectionName).take(40)
+            if (!courseId.isNullOrBlank()) payload["courseId"] = courseId
+
+            docRef.set(payload).await()
+            incrementDailyCounter(uid, isAi = false)
+            governance.logAuditEvent(
+                action = "ZOOM_CREATED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Created live Zoom session '$cleanTitle'."
+            )
+            governance.sendNotification(
+                title = cleanTitle,
+                body = "Live Zoom session scheduled by $hostName.",
+                category = NotificationCategory.ZOOM,
+                targetUid = "ALL"
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteZoomSession(sessionId: String): Result<Unit> {
+        val docPath = "zoom_sessions/$sessionId"
+        return try {
+            requireUserId()
+            db.collection("zoom_sessions").document(sessionId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    // --- General / Year / Section Instructions ("تعليمات للكل") ---
+
+    fun observeInstructions(isAdmin: Boolean): Flow<List<InstructionNotice>> = flow {
+        val uid = requireUserId()
+        val path = "instructions"
+        val query = if (isAdmin) {
+            db.collection(path)
+        } else {
+            db.collection(path).whereEqualTo("published", true)
+        }
+        emitAll(
+            query.snapshots()
+                .map { snap ->
+                    snap.toObjects(InstructionNotice::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedWith(
+                            compareByDescending<InstructionNotice> { it.priority == InstructionPriority.PINNED.name }
+                                .thenByDescending { it.priority == InstructionPriority.IMPORTANT.name }
+                                .thenByDescending { it.createdAt?.seconds ?: Long.MAX_VALUE }
+                        )
+                }
+                .catch { error ->
+                    unwrapAndLog(error, OperationType.LIST, path, uid)
+                    throw error
+                }
+        )
+    }
+
+    suspend fun createInstruction(
+        title: String,
+        body: String,
+        priority: InstructionPriority,
+        departmentId: String?,
+        departmentName: String?,
+        academicYear: String?,
+        sectionName: String?,
+        governance: UniCoreGovernanceRepository
+    ): Result<Unit> {
+        var docPath = "instructions"
+        return try {
+            val uid = requireUserId()
+            val cleanTitle = when (val r = InputValidator.validateBoundedText(title, "Instruction title", 2, 120)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanBody = when (val r = InputValidator.validateBoundedText(body, "Instruction body", 2, 1200)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val authorName = InputValidator.sanitizeText(auth.currentUser?.displayName ?: "Administration")
+                .take(60).ifBlank { "Administration" }.let { if (it.length < 2) "Admin" else it }
+
+            val docRef = db.collection("instructions").document()
+            docPath = docRef.path
+            val payload = mutableMapOf<String, Any>(
+                "title" to cleanTitle,
+                "body" to cleanBody,
+                "priority" to priority.name,
+                "published" to true,
+                "createdBy" to uid,
+                "createdByName" to authorName,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (!departmentId.isNullOrBlank()) payload["departmentId"] = departmentId
+            if (!departmentName.isNullOrBlank()) payload["departmentName"] = InputValidator.sanitizeText(departmentName).take(80)
+            if (!academicYear.isNullOrBlank()) payload["academicYear"] = InputValidator.sanitizeText(academicYear).take(40)
+            if (!sectionName.isNullOrBlank()) payload["sectionName"] = InputValidator.sanitizeText(sectionName).take(40)
+
+            docRef.set(payload).await()
+            incrementDailyCounter(uid, isAi = false)
+            governance.logAuditEvent(
+                action = "INSTRUCTION_PUBLISHED",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Published instruction '$cleanTitle' (${priority.name})."
+            )
+            governance.sendNotification(
+                title = cleanTitle,
+                body = cleanBody.take(200),
+                category = NotificationCategory.ANNOUNCEMENT,
+                targetUid = "ALL"
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteInstruction(instructionId: String): Result<Unit> {
+        val docPath = "instructions/$instructionId"
+        return try {
+            requireUserId()
+            db.collection("instructions").document(instructionId).delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    // --- Section Messages ("رسائل وتنبيهات كل سكشن") ---
+
+    fun observeSectionMessages(): Flow<List<SectionMessage>> = flow {
+        val uid = requireUserId()
+        val path = "section_messages"
+        emitAll(
+            db.collection(path)
+                .snapshots()
+                .map { snap ->
+                    snap.toObjects(SectionMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                        .sortedWith(
+                            compareByDescending<SectionMessage> { it.pinned }
+                                .thenByDescending { it.createdAt?.seconds ?: Long.MAX_VALUE }
+                        )
+                }
+                .catch { error ->
+                    unwrapAndLog(error, OperationType.LIST, path, uid)
+                    throw error
+                }
+        )
+    }
+
+    suspend fun sendSectionMessage(
+        departmentId: String?,
+        departmentName: String,
+        academicYear: String,
+        sectionName: String,
+        senderRole: UserRole,
+        messageType: SectionMessageType,
+        pinned: Boolean,
+        rawText: String,
+        videoUrl: String? = null,
+        governance: UniCoreGovernanceRepository
+    ): Result<Unit> {
+        var docPath = "section_messages"
+        return try {
+            val uid = requireUserId()
+            val cleanDept = when (val r = InputValidator.validateBoundedText(departmentName, "Department", 1, 80)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanYear = when (val r = InputValidator.validateBoundedText(academicYear, "Academic Year", 1, 40)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanSec = when (val r = InputValidator.validateBoundedText(sectionName, "Section", 1, 40)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanText = when (val r = InputValidator.validateBoundedText(rawText, "Section message", 1, 1000)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val cleanVideo = when (val r = InputValidator.validateOptionalHttpsUrl(videoUrl)) {
+                is InputValidator.ValidationResult.Valid -> r.value
+                is InputValidator.ValidationResult.Invalid -> return Result.failure(IllegalArgumentException(r.reason))
+            }
+            val senderName = InputValidator.sanitizeText(auth.currentUser?.displayName ?: "UniCore Member")
+                .take(60).ifBlank { "Member" }.let { if (it.length < 2) "Member" else it }
+
+            val safeType = if (senderRole == UserRole.STUDENT) SectionMessageType.MESSAGE else messageType
+            val safePinned = if (senderRole == UserRole.STUDENT) false else pinned
+
+            val docRef = db.collection("section_messages").document()
+            docPath = docRef.path
+            val payload = mutableMapOf<String, Any>(
+                "departmentName" to cleanDept,
+                "academicYear" to cleanYear,
+                "sectionName" to cleanSec,
+                "senderUid" to uid,
+                "senderName" to senderName,
+                "senderRole" to senderRole.name,
+                "messageType" to safeType.name,
+                "isPinned" to safePinned,
+                "text" to cleanText,
+                "createdAt" to FieldValue.serverTimestamp()
+            )
+            if (!departmentId.isNullOrBlank()) payload["departmentId"] = departmentId
+            if (cleanVideo != null) payload["videoUrl"] = cleanVideo
+
+            docRef.set(payload).await()
+            incrementDailyCounter(uid, isAi = false)
+            governance.logAuditEvent(
+                action = "SECTION_MESSAGE_SENT",
+                severity = AuditSeverity.INFO,
+                targetPath = docPath,
+                details = "Posted ${safeType.name} in $cleanDept / $cleanYear / $cleanSec."
+            )
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteSectionMessage(messageId: String): Result<Unit> {
+        val docPath = "section_messages/$messageId"
+        return try {
+            requireUserId()
+            db.collection("section_messages").document(messageId).delete().await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e

@@ -4,6 +4,7 @@ import androidx.annotation.Keep
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentId
 import com.google.firebase.firestore.IgnoreExtraProperties
+import com.google.firebase.firestore.PropertyName
 import com.google.firebase.firestore.ServerTimestamp
 
 enum class UserRole {
@@ -13,7 +14,8 @@ enum class UserRole {
 
     companion object {
         fun fromRaw(raw: String?): UserRole {
-            return entries.firstOrNull { it.name == raw } ?: STUDENT
+            val normalized = raw?.trim()?.uppercase()?.replace('-', '_')
+            return entries.firstOrNull { it.name == normalized } ?: STUDENT
         }
     }
 }
@@ -44,6 +46,42 @@ enum class AuditSeverity {
     }
 }
 
+enum class ScheduleItemType {
+    LECTURE,
+    SECTION,
+    ASSIGNMENT,
+    EXAM;
+
+    companion object {
+        fun fromRaw(raw: String?): ScheduleItemType {
+            return entries.firstOrNull { it.name == raw } ?: LECTURE
+        }
+    }
+}
+
+enum class InstructionPriority {
+    NORMAL,
+    IMPORTANT,
+    PINNED;
+
+    companion object {
+        fun fromRaw(raw: String?): InstructionPriority {
+            return entries.firstOrNull { it.name == raw } ?: NORMAL
+        }
+    }
+}
+
+enum class SectionMessageType {
+    NOTICE,
+    MESSAGE;
+
+    companion object {
+        fun fromRaw(raw: String?): SectionMessageType {
+            return entries.firstOrNull { it.name == raw } ?: MESSAGE
+        }
+    }
+}
+
 @Keep
 @IgnoreExtraProperties
 data class UserProfile(
@@ -57,6 +95,14 @@ data class UserProfile(
     val accountDisabled: Boolean = false,
     val banUntilMillis: Long = 0L,
     val banReason: String = "",
+    val departmentId: String? = null,
+    val departmentName: String? = null,
+    val academicYear: String? = null,
+    val sectionName: String? = null,
+    val placementCompleted: Boolean = false,
+    val favoriteCourseIds: List<String> = emptyList(),
+    val completedAssignmentIds: List<String> = emptyList(),
+    val classroomConnected: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -70,6 +116,8 @@ data class SystemSettings(
     val maxFileUploadBytes: Long = 5_242_880L,
     val aiEnabled: Boolean = true,
     val zeroCostLockActive: Boolean = false,
+    val tutorialVideoUrl: String? = null,
+    val tutorialVideoTitle: String? = null,
     val updatedBy: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
@@ -105,6 +153,9 @@ data class Course(
     val departmentId: String? = null,
     val departmentName: String? = null,
     val academicYear: String? = null,
+    val sectionName: String? = null,
+    val videoUrl: String? = null,
+    val videoTitle: String? = null,
     val published: Boolean = true,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
@@ -148,6 +199,113 @@ data class DriveSyncedFile(
     val downloadUrl: String,
     val subFolderPath: String = "",
     val rootFolderTitle: String = folderTitle
+)
+
+@Keep
+@IgnoreExtraProperties
+data class AssignmentItem(
+    @DocumentId val id: String = "",
+    val title: String = "",
+    val description: String = "",
+    val courseId: String? = null,
+    val courseTitle: String? = null,
+    val departmentId: String? = null,
+    val departmentName: String? = null,
+    val academicYear: String? = null,
+    val sectionName: String? = null,
+    val dueAtMillis: Long = 0L,
+    val classroomLink: String? = null,
+    val videoUrl: String? = null,
+    val sourceType: String = "APP",
+    val ownerUid: String = "ALL",
+    val published: Boolean = true,
+    val createdBy: String = "",
+    val createdByName: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class ScheduleItem(
+    @DocumentId val id: String = "",
+    val title: String = "",
+    val itemType: String = ScheduleItemType.LECTURE.name,
+    val dayOfWeek: Long = 0L,
+    val startTimeText: String = "",
+    val endTimeText: String = "",
+    val locationOrMode: String = "",
+    val instructorName: String? = null,
+    val departmentId: String? = null,
+    val departmentName: String? = null,
+    val academicYear: String? = null,
+    val sectionName: String? = null,
+    val courseId: String? = null,
+    val videoUrl: String? = null,
+    val dueAtMillis: Long = 0L,
+    val published: Boolean = true,
+    val createdBy: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class ZoomSession(
+    @DocumentId val id: String = "",
+    val title: String = "",
+    val topic: String? = null,
+    val zoomUrl: String = "",
+    val scheduledAtMillis: Long = 0L,
+    val durationMinutes: Long = 60L,
+    val hostName: String = "",
+    val departmentId: String? = null,
+    val departmentName: String? = null,
+    val academicYear: String? = null,
+    val sectionName: String? = null,
+    val courseId: String? = null,
+    val published: Boolean = true,
+    val createdBy: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class InstructionNotice(
+    @DocumentId val id: String = "",
+    val title: String = "",
+    val body: String = "",
+    val priority: String = InstructionPriority.NORMAL.name,
+    val departmentId: String? = null,
+    val departmentName: String? = null,
+    val academicYear: String? = null,
+    val sectionName: String? = null,
+    val published: Boolean = true,
+    val createdBy: String = "",
+    val createdByName: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class SectionMessage(
+    @DocumentId val id: String = "",
+    val departmentId: String? = null,
+    val departmentName: String = "",
+    val academicYear: String = "",
+    val sectionName: String = "",
+    val senderUid: String = "",
+    val senderName: String = "",
+    val senderRole: String = UserRole.STUDENT.name,
+    val messageType: String = SectionMessageType.MESSAGE.name,
+    @get:PropertyName("isPinned")
+    @param:PropertyName("isPinned")
+    val pinned: Boolean = false,
+    val text: String = "",
+    val videoUrl: String? = null,
+    @ServerTimestamp val createdAt: Timestamp? = null
 )
 
 @Keep
@@ -246,7 +404,9 @@ enum class NotificationCategory {
     GRADE,
     ROLE,
     SECURITY,
-    ANNOUNCEMENT;
+    ANNOUNCEMENT,
+    ASSIGNMENT,
+    ZOOM;
 
     companion object {
         fun fromRaw(raw: String?): NotificationCategory {
@@ -334,5 +494,42 @@ data class StudyChatMessage(
     val attachmentName: String? = null,
     @ServerTimestamp val createdAt: Timestamp? = null
 )
+
+object AcademicScopeFilter {
+    fun matchesStudentScope(
+        userProfile: UserProfile?,
+        userRole: UserRole,
+        itemDeptId: String?,
+        itemDeptName: String?,
+        itemYear: String?,
+        itemSection: String?
+    ): Boolean {
+        if (userRole != UserRole.STUDENT) return true
+        val profile = userProfile ?: return true
+        if (!profile.placementCompleted) return true
+
+        val deptMatches = when {
+            itemDeptId.isNullOrBlank() && itemDeptName.isNullOrBlank() -> true
+            itemDeptName.equals("ALL", ignoreCase = true) -> true
+            profile.departmentId.isNullOrBlank() && profile.departmentName.isNullOrBlank() -> true
+            else -> (!profile.departmentId.isNullOrBlank() && profile.departmentId == itemDeptId) ||
+                (!profile.departmentName.isNullOrBlank() && itemDeptName.equals(profile.departmentName, ignoreCase = true))
+        }
+        val yearMatches = when {
+            itemYear.isNullOrBlank() -> true
+            itemYear.equals("ALL", ignoreCase = true) -> true
+            profile.academicYear.isNullOrBlank() -> true
+            else -> itemYear.equals(profile.academicYear, ignoreCase = true)
+        }
+        val sectionMatches = when {
+            itemSection.isNullOrBlank() -> true
+            itemSection.equals("ALL", ignoreCase = true) -> true
+            profile.sectionName.isNullOrBlank() -> true
+            else -> itemSection.equals(profile.sectionName, ignoreCase = true)
+        }
+        return deptMatches && yearMatches && sectionMatches
+    }
+}
+
 
 

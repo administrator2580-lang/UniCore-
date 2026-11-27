@@ -39,7 +39,11 @@ service cloud.firestore {
     function isSuperAdmin() {
       return isSignedIn() && (
         isBootstrappedSuperAdmin() ||
-        exists(/databases/$(database)/documents/super_admins/$(request.auth.uid))
+        exists(/databases/$(database)/documents/super_admins/$(request.auth.uid)) ||
+        (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['SUPER_ADMIN', 'super_admin']
+        )
       );
     }
 
@@ -50,13 +54,17 @@ service cloud.firestore {
       );
     }
 
-    function isActiveAccount() {
-      return isSuperAdmin() || !(
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && (
-          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('accountDisabled', false) == true ||
-          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('banUntilMillis', 0) > request.time.toMillis()
-        )
+    function isNotBannedOrDisabled() {
+      return !exists(/databases/$(database)/documents/users/$(request.auth.uid)) || (
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('accountDisabled', false) != true &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('banUntilMillis', 0) <= request.time.toMillis()
       );
+    }
+
+    function isActiveAccount() {
+      return isNotBannedOrDisabled() ||
+        isBootstrappedSuperAdmin() ||
+        exists(/databases/$(database)/documents/super_admins/$(request.auth.uid));
     }
 
     function isVerifiedEmailUser() {
@@ -75,12 +83,20 @@ service cloud.firestore {
         id.matches('^[a-z0-9_.+-]+@[a-z0-9.-]+\\.[a-z]{2,}$');
     }
 
-    function hasPendingAdminInvite() {
+    function hasPendingInviteRoles(allowedRoles) {
       return isVerifiedEmailUser() &&
         exists(/databases/$(database)/documents/role_invites/$(request.auth.token.email.lower())) &&
-        get(/databases/$(database)/documents/role_invites/$(request.auth.token.email.lower())).data.assignedRole == 'ADMIN' &&
+        get(/databases/$(database)/documents/role_invites/$(request.auth.token.email.lower())).data.assignedRole in allowedRoles &&
         get(/databases/$(database)/documents/role_invites/$(request.auth.token.email.lower())).data.status == 'PENDING' &&
         get(/databases/$(database)/documents/role_invites/$(request.auth.token.email.lower())).data.email == request.auth.token.email.lower();
+    }
+
+    function hasPendingAdminInvite() {
+      return hasPendingInviteRoles(['ADMIN']);
+    }
+
+    function hasPendingSuperAdminInvite() {
+      return hasPendingInviteRoles(['SUPER_ADMIN', 'super_admin']);
     }
 
     function isValidTimestamp(ts) {
@@ -114,6 +130,8 @@ service cloud.firestore {
         data.maxFileUploadBytes is int && data.maxFileUploadBytes >= 102400 && data.maxFileUploadBytes <= 5242880 &&
         data.aiEnabled is bool &&
         data.zeroCostLockActive is bool &&
+        (!('tutorialVideoUrl' in data) || data.tutorialVideoUrl == null || isValidHttpsUrl(data.tutorialVideoUrl)) &&
+        (!('tutorialVideoTitle' in data) || data.tutorialVideoTitle == null || (data.tutorialVideoTitle is string && data.tutorialVideoTitle.size() <= 120)) &&
         data.updatedBy is string && isValidId(data.updatedBy) &&
         isValidTimestamp(data.createdAt) &&
         isValidTimestamp(data.updatedAt);
@@ -122,13 +140,27 @@ service cloud.firestore {
     function isValidUserProfile(data) {
       return data.userId is string && isValidId(data.userId) &&
         data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 60 &&
-        data.role in ['STUDENT', 'ADMIN', 'SUPER_ADMIN'] &&
+        data.role in ['STUDENT', 'ADMIN', 'SUPER_ADMIN', 'super_admin'] &&
         data.aiCallsToday is int && data.aiCallsToday >= 0 && data.aiCallsToday <= 1000 &&
         data.writesToday is int && data.writesToday >= 0 && data.writesToday <= 5000 &&
         data.quotaDayKey is string && data.quotaDayKey.size() >= 8 && data.quotaDayKey.size() <= 16 &&
         (!('accountDisabled' in data) || data.accountDisabled is bool) &&
         (!('banUntilMillis' in data) || (data.banUntilMillis is int && data.banUntilMillis >= 0)) &&
         (!('banReason' in data) || (data.banReason is string && data.banReason.size() <= 200)) &&
+        (!('departmentId' in data) || (data.departmentId is string && data.departmentId.size() <= 128)) &&
+        (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() <= 80)) &&
+        (!('academicYear' in data) || (data.academicYear is string && data.academicYear.size() <= 40)) &&
+        (!('sectionName' in data) || (data.sectionName is string && data.sectionName.size() <= 40)) &&
+        (!('placementCompleted' in data) || data.placementCompleted is bool) &&
+        (!('favoriteCourseIds' in data) || (
+          data.favoriteCourseIds is list && data.favoriteCourseIds.size() <= 100 &&
+          (data.favoriteCourseIds.size() == 0 || data.favoriteCourseIds[0] is string)
+        )) &&
+        (!('completedAssignmentIds' in data) || (
+          data.completedAssignmentIds is list && data.completedAssignmentIds.size() <= 200 &&
+          (data.completedAssignmentIds.size() == 0 || data.completedAssignmentIds[0] is string)
+        )) &&
+        (!('classroomConnected' in data) || data.classroomConnected is bool) &&
         isValidTimestamp(data.createdAt) &&
         isValidTimestamp(data.updatedAt);
     }
@@ -174,6 +206,9 @@ service cloud.firestore {
         (!('departmentId' in data) || isValidId(data.departmentId)) &&
         (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() >= 2 && data.departmentName.size() <= 80)) &&
         (!('academicYear' in data) || (data.academicYear is string && data.academicYear.size() >= 1 && data.academicYear.size() <= 40)) &&
+        (!('sectionName' in data) || (data.sectionName is string && data.sectionName.size() >= 1 && data.sectionName.size() <= 40)) &&
+        (!('videoUrl' in data) || isValidHttpsUrl(data.videoUrl)) &&
+        (!('videoTitle' in data) || (data.videoTitle is string && data.videoTitle.size() >= 1 && data.videoTitle.size() <= 120)) &&
         data.published is bool &&
         isValidTimestamp(data.createdAt) &&
         isValidTimestamp(data.updatedAt);
@@ -210,6 +245,96 @@ service cloud.firestore {
         data.createdBy is string && isValidId(data.createdBy) &&
         isValidTimestamp(data.createdAt) &&
         isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidAssignment(data) {
+      return data.title is string && data.title.size() >= 2 && data.title.size() <= 120 &&
+        data.description is string && data.description.size() <= 800 &&
+        data.dueAtMillis is int && data.dueAtMillis >= 0 &&
+        data.sourceType in ['APP', 'CLASSROOM'] &&
+        data.ownerUid is string && (data.ownerUid == 'ALL' || isValidId(data.ownerUid)) &&
+        data.published is bool &&
+        data.createdBy is string && isValidId(data.createdBy) &&
+        data.createdByName is string && data.createdByName.size() >= 2 && data.createdByName.size() <= 60 &&
+        (!('courseId' in data) || isValidId(data.courseId)) &&
+        (!('courseTitle' in data) || (data.courseTitle is string && data.courseTitle.size() >= 1 && data.courseTitle.size() <= 100)) &&
+        (!('departmentId' in data) || isValidId(data.departmentId)) &&
+        (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() >= 1 && data.departmentName.size() <= 80)) &&
+        (!('academicYear' in data) || (data.academicYear is string && data.academicYear.size() >= 1 && data.academicYear.size() <= 40)) &&
+        (!('sectionName' in data) || (data.sectionName is string && data.sectionName.size() >= 1 && data.sectionName.size() <= 40)) &&
+        (!('classroomLink' in data) || isValidHttpsUrl(data.classroomLink)) &&
+        (!('videoUrl' in data) || isValidHttpsUrl(data.videoUrl)) &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidScheduleItem(data) {
+      return data.title is string && data.title.size() >= 2 && data.title.size() <= 120 &&
+        data.itemType in ['LECTURE', 'SECTION', 'ASSIGNMENT', 'EXAM'] &&
+        data.dayOfWeek is int && data.dayOfWeek >= 0 && data.dayOfWeek <= 6 &&
+        data.startTimeText is string && data.startTimeText.size() >= 1 && data.startTimeText.size() <= 20 &&
+        data.endTimeText is string && data.endTimeText.size() >= 1 && data.endTimeText.size() <= 20 &&
+        data.locationOrMode is string && data.locationOrMode.size() >= 1 && data.locationOrMode.size() <= 100 &&
+        (!('instructorName' in data) || (data.instructorName is string && data.instructorName.size() <= 60)) &&
+        (!('departmentId' in data) || isValidId(data.departmentId)) &&
+        (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() >= 1 && data.departmentName.size() <= 80)) &&
+        (!('academicYear' in data) || (data.academicYear is string && data.academicYear.size() >= 1 && data.academicYear.size() <= 40)) &&
+        (!('sectionName' in data) || (data.sectionName is string && data.sectionName.size() >= 1 && data.sectionName.size() <= 40)) &&
+        (!('courseId' in data) || isValidId(data.courseId)) &&
+        (!('videoUrl' in data) || isValidHttpsUrl(data.videoUrl)) &&
+        (!('dueAtMillis' in data) || (data.dueAtMillis is int && data.dueAtMillis >= 0)) &&
+        data.published is bool &&
+        data.createdBy is string && isValidId(data.createdBy) &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidZoomSession(data) {
+      return data.title is string && data.title.size() >= 2 && data.title.size() <= 120 &&
+        (!('topic' in data) || (data.topic is string && data.topic.size() <= 300)) &&
+        data.zoomUrl is string && isValidHttpsUrl(data.zoomUrl) &&
+        data.scheduledAtMillis is int && data.scheduledAtMillis >= 0 &&
+        data.durationMinutes is int && data.durationMinutes >= 5 && data.durationMinutes <= 360 &&
+        data.hostName is string && data.hostName.size() >= 2 && data.hostName.size() <= 60 &&
+        (!('departmentId' in data) || isValidId(data.departmentId)) &&
+        (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() >= 1 && data.departmentName.size() <= 80)) &&
+        (!('academicYear' in data) || (data.academicYear is string && data.academicYear.size() >= 1 && data.academicYear.size() <= 40)) &&
+        (!('sectionName' in data) || (data.sectionName is string && data.sectionName.size() >= 1 && data.sectionName.size() <= 40)) &&
+        (!('courseId' in data) || isValidId(data.courseId)) &&
+        data.published is bool &&
+        data.createdBy is string && isValidId(data.createdBy) &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidInstructionNotice(data) {
+      return data.title is string && data.title.size() >= 2 && data.title.size() <= 120 &&
+        data.body is string && data.body.size() >= 2 && data.body.size() <= 1200 &&
+        data.priority in ['NORMAL', 'IMPORTANT', 'PINNED'] &&
+        (!('departmentId' in data) || isValidId(data.departmentId)) &&
+        (!('departmentName' in data) || (data.departmentName is string && data.departmentName.size() >= 1 && data.departmentName.size() <= 80)) &&
+        (!('academicYear' in data) || (data.academicYear is string && data.academicYear.size() >= 1 && data.academicYear.size() <= 40)) &&
+        (!('sectionName' in data) || (data.sectionName is string && data.sectionName.size() >= 1 && data.sectionName.size() <= 40)) &&
+        data.published is bool &&
+        data.createdBy is string && isValidId(data.createdBy) &&
+        data.createdByName is string && data.createdByName.size() >= 2 && data.createdByName.size() <= 60 &&
+        isValidTimestamp(data.createdAt) &&
+        isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidSectionMessage(data) {
+      return (!('departmentId' in data) || isValidId(data.departmentId)) &&
+        data.departmentName is string && data.departmentName.size() >= 1 && data.departmentName.size() <= 80 &&
+        data.academicYear is string && data.academicYear.size() >= 1 && data.academicYear.size() <= 40 &&
+        data.sectionName is string && data.sectionName.size() >= 1 && data.sectionName.size() <= 40 &&
+        data.senderUid is string && isValidId(data.senderUid) &&
+        data.senderName is string && data.senderName.size() >= 2 && data.senderName.size() <= 60 &&
+        data.senderRole in ['STUDENT', 'ADMIN', 'SUPER_ADMIN'] &&
+        data.messageType in ['NOTICE', 'MESSAGE'] &&
+        (!('isPinned' in data) || data.isPinned is bool) &&
+        data.text is string && data.text.size() >= 1 && data.text.size() <= 1000 &&
+        (!('videoUrl' in data) || isValidHttpsUrl(data.videoUrl)) &&
+        isValidTimestamp(data.createdAt);
     }
 
     function isValidQuiz(data) {
@@ -287,7 +412,15 @@ service cloud.firestore {
           'SUPPORT_MESSAGE_SENT',
           'DEPARTMENT_UPDATED',
           'PROFANITY_BLOCKED',
-          'CHAT_MESSAGE_DELETED'
+          'CHAT_MESSAGE_DELETED',
+          'ASSIGNMENT_CREATED',
+          'SCHEDULE_UPDATED',
+          'ZOOM_CREATED',
+          'INSTRUCTION_PUBLISHED',
+          'USER_SECTION_UPDATED',
+          'TUTORIAL_UPDATED',
+          'SECTION_MESSAGE_SENT',
+          'SUPER_ADMIN_GRANTED'
         ] &&
         data.severity in ['INFO', 'WARN', 'HIGH', 'CRITICAL'] &&
         data.targetPath is string && data.targetPath.size() >= 1 && data.targetPath.size() <= 180 &&
@@ -298,7 +431,7 @@ service cloud.firestore {
     function isValidRoleInvite(data) {
       return data.email is string && isValidEmailDocId(data.email) &&
         data.displayNameHint is string && data.displayNameHint.size() >= 2 && data.displayNameHint.size() <= 60 &&
-        data.assignedRole in ['STUDENT', 'ADMIN'] &&
+        data.assignedRole in ['STUDENT', 'ADMIN', 'SUPER_ADMIN'] &&
         data.invitedBy is string && isValidId(data.invitedBy) &&
         data.invitedByLabel is string && data.invitedByLabel.size() >= 2 && data.invitedByLabel.size() <= 80 &&
         data.status in ['PENDING', 'CLAIMED'] &&
@@ -310,7 +443,7 @@ service cloud.firestore {
     function isValidNotification(data) {
       return data.title is string && data.title.size() >= 2 && data.title.size() <= 100 &&
         data.body is string && data.body.size() >= 2 && data.body.size() <= 400 &&
-        data.category in ['COURSE', 'QUIZ', 'GRADE', 'ROLE', 'SECURITY', 'ANNOUNCEMENT'] &&
+        data.category in ['COURSE', 'QUIZ', 'GRADE', 'ROLE', 'SECURITY', 'ANNOUNCEMENT', 'ASSIGNMENT', 'ZOOM'] &&
         data.targetUid is string && (data.targetUid == 'ALL' || isValidId(data.targetUid)) &&
         data.senderUid is string && isValidId(data.senderUid) &&
         data.senderName is string && data.senderName.size() >= 2 && data.senderName.size() <= 60 &&
@@ -364,12 +497,15 @@ service cloud.firestore {
     match /super_admins/{userId} {
       allow get: if isValidId(userId) && isSuperAdmin();
       allow list: if isSuperAdmin();
-      allow create: if isSuperAdmin() &&
-        isValidId(userId) &&
+      allow create: if isValidId(userId) &&
         incoming().userId == userId &&
         incoming().keys().hasAll(['userId', 'email', 'createdAt', 'updatedAt']) &&
         incoming().keys().hasOnly(['userId', 'email', 'createdAt', 'updatedAt']) &&
-        isValidRoleGrant(incoming());
+        isValidRoleGrant(incoming()) && (
+          isSuperAdmin() ||
+          (isOwner(userId) && hasPendingSuperAdminInvite() &&
+           incoming().email.lower() == request.auth.token.email.lower())
+        );
       allow update: if false;
       allow delete: if isValidId(userId) && isSuperAdmin() && userId != request.auth.uid;
     }
@@ -403,7 +539,8 @@ service cloud.firestore {
         ]) &&
         incoming().keys().hasOnly([
           'dailyAiLimitPerUser', 'dailyWriteLimitPerUser', 'maxFileUploadBytes',
-          'aiEnabled', 'zeroCostLockActive', 'updatedBy', 'createdAt', 'updatedAt'
+          'aiEnabled', 'zeroCostLockActive', 'tutorialVideoUrl', 'tutorialVideoTitle',
+          'updatedBy', 'createdAt', 'updatedAt'
         ]) &&
         isValidSystemSettings(incoming());
       allow update: if isSuperAdmin() &&
@@ -413,7 +550,8 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().diff(existing()).affectedKeys().hasOnly([
           'dailyAiLimitPerUser', 'dailyWriteLimitPerUser', 'maxFileUploadBytes',
-          'aiEnabled', 'zeroCostLockActive', 'updatedBy', 'updatedAt'
+          'aiEnabled', 'zeroCostLockActive', 'tutorialVideoUrl', 'tutorialVideoTitle',
+          'updatedBy', 'updatedAt'
         ]);
       allow delete: if false;
     }
@@ -427,7 +565,7 @@ service cloud.firestore {
         incoming().userId == request.auth.uid &&
         (
           incoming().role == 'STUDENT' ||
-          (incoming().role == 'SUPER_ADMIN' && isBootstrappedSuperAdmin()) ||
+          (incoming().role in ['SUPER_ADMIN', 'super_admin'] && (isBootstrappedSuperAdmin() || isSuperAdmin() || hasPendingSuperAdminInvite())) ||
           (incoming().role == 'ADMIN' && (isAdmin() || hasPendingAdminInvite()))
         ) &&
         incoming().aiCallsToday == 0 &&
@@ -439,44 +577,53 @@ service cloud.firestore {
         ]) &&
         incoming().keys().hasOnly([
           'userId', 'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey',
-          'accountDisabled', 'banUntilMillis', 'banReason', 'createdAt', 'updatedAt'
+          'accountDisabled', 'banUntilMillis', 'banReason',
+          'departmentId', 'departmentName', 'academicYear', 'sectionName', 'placementCompleted',
+          'favoriteCourseIds', 'completedAssignmentIds', 'classroomConnected',
+          'createdAt', 'updatedAt'
         ]) &&
         isValidUserProfile(incoming());
       allow update: if isSignedIn() &&
         isValidId(userId) &&
-        isValidUserProfile(incoming()) &&
         incoming().userId == existing().userId &&
-        incoming().createdAt == existing().createdAt && (
+        incoming().createdAt == existing().createdAt &&
+        isValidUserProfile(incoming()) && (
           (
             isOwner(userId) &&
-            isActiveAccount() &&
-            (
-              incoming().role == existing().role ||
-              (existing().role == 'STUDENT' && incoming().role == 'ADMIN' && hasPendingAdminInvite())
-            ) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey', 'updatedAt'
-            ])
+              'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey',
+              'departmentId', 'departmentName', 'academicYear', 'sectionName', 'placementCompleted',
+              'favoriteCourseIds', 'completedAssignmentIds', 'classroomConnected',
+              'updatedAt'
+            ]) &&
+            isActiveAccount() && (
+              incoming().role == existing().role ||
+              (existing().role == 'STUDENT' && incoming().role == 'ADMIN' && hasPendingAdminInvite()) ||
+              (existing().role in ['STUDENT', 'ADMIN'] && incoming().role in ['SUPER_ADMIN', 'super_admin'] && hasPendingSuperAdminInvite())
+            )
           ) || (
-            isAdmin() &&
-            isActiveAccount() &&
-            existing().role == 'STUDENT' &&
             userId != request.auth.uid &&
+            existing().role == 'STUDENT' &&
             incoming().role == existing().role &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'banUntilMillis', 'banReason', 'updatedAt'
-            ])
+            ]) &&
+            isAdmin() &&
+            isActiveAccount()
           ) || (
-            isSuperAdmin() &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'displayName', 'role', 'aiCallsToday', 'writesToday', 'quotaDayKey',
-              'accountDisabled', 'banUntilMillis', 'banReason', 'updatedAt'
+              'accountDisabled', 'banUntilMillis', 'banReason',
+              'departmentId', 'departmentName', 'academicYear', 'sectionName', 'placementCompleted',
+              'favoriteCourseIds', 'completedAssignmentIds', 'classroomConnected',
+              'updatedAt'
             ]) &&
             (
+              userId != request.auth.uid ||
               (!('accountDisabled' in incoming().diff(existing()).affectedKeys()) &&
-               !('banUntilMillis' in incoming().diff(existing()).affectedKeys())) ||
-              userId != request.auth.uid
-            )
+               !('banUntilMillis' in incoming().diff(existing()).affectedKeys()))
+            ) &&
+            isSuperAdmin()
           )
         );
       allow delete: if isValidId(userId) && isSuperAdmin() && userId != request.auth.uid;
@@ -537,7 +684,7 @@ service cloud.firestore {
         incoming().keys().hasOnly([
           'title', 'description', 'instructorId', 'instructorName', 'materialLink', 'materialType',
           'hasAttachment', 'attachmentName', 'attachmentMimeType', 'attachmentSizeBytes', 'chunkCount', 'attachmentSha256',
-          'departmentId', 'departmentName', 'academicYear',
+          'departmentId', 'departmentName', 'academicYear', 'sectionName', 'videoUrl', 'videoTitle',
           'published', 'createdAt', 'updatedAt'
         ]) &&
         isValidCourse(incoming());
@@ -549,7 +696,7 @@ service cloud.firestore {
         incoming().diff(existing()).affectedKeys().hasOnly([
           'title', 'description', 'instructorName', 'materialLink', 'materialType',
           'hasAttachment', 'attachmentName', 'attachmentMimeType', 'attachmentSizeBytes', 'chunkCount', 'attachmentSha256',
-          'departmentId', 'departmentName', 'academicYear',
+          'departmentId', 'departmentName', 'academicYear', 'sectionName', 'videoUrl', 'videoTitle',
           'published', 'updatedAt'
         ]);
       allow delete: if isAdmin() && isActiveAccount() && isValidId(courseId);
@@ -598,7 +745,6 @@ service cloud.firestore {
       allow delete: if isSuperAdmin() && isActiveAccount() && isValidDriveFolderId(folderDocId);
     }
 
-    // Academic Departments & Study Years: Writable ONLY by Admins & Super Admins; Active users read
     match /departments/{deptId} {
       allow get, list: if isSignedIn() && isActiveAccount();
       allow create: if isAdmin() && isActiveAccount() &&
@@ -614,6 +760,171 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'years', 'updatedAt']);
       allow delete: if isAdmin() && isActiveAccount() && isValidId(deptId);
+    }
+
+    match /assignments/{assignmentId} {
+      allow get: if isSignedIn() && isActiveAccount() && isValidId(assignmentId) && (
+        isAdmin() ||
+        (existing().published == true && (existing().ownerUid == 'ALL' || existing().ownerUid == request.auth.uid))
+      );
+      allow list: if isSignedIn() && isActiveAccount() && (
+        isAdmin() ||
+        resource.data.ownerUid == 'ALL' ||
+        resource.data.ownerUid == request.auth.uid
+      );
+      allow create: if isSignedIn() && isActiveAccount() &&
+        isValidId(assignmentId) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().keys().hasAll([
+          'title', 'description', 'dueAtMillis', 'sourceType', 'ownerUid', 'published',
+          'createdBy', 'createdByName', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'title', 'description', 'courseId', 'courseTitle',
+          'departmentId', 'departmentName', 'academicYear', 'sectionName',
+          'dueAtMillis', 'classroomLink', 'videoUrl', 'sourceType', 'ownerUid',
+          'published', 'createdBy', 'createdByName', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidAssignment(incoming()) && (
+          (isAdmin() && incoming().ownerUid == 'ALL') ||
+          (incoming().ownerUid == request.auth.uid && incoming().sourceType == 'CLASSROOM')
+        );
+      allow update: if isSignedIn() && isActiveAccount() &&
+        isValidId(assignmentId) &&
+        isValidAssignment(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          existing().ownerUid == request.auth.uid
+        ) &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'description', 'courseId', 'courseTitle',
+          'departmentId', 'departmentName', 'academicYear', 'sectionName',
+          'dueAtMillis', 'classroomLink', 'videoUrl', 'published', 'updatedAt'
+        ]);
+      allow delete: if isSignedIn() && isActiveAccount() && isValidId(assignmentId) && (
+        isAdmin() ||
+        existing().ownerUid == request.auth.uid
+      );
+    }
+
+    match /schedule_items/{itemId} {
+      allow get: if isSignedIn() && isActiveAccount() && isValidId(itemId) && (existing().published == true || isAdmin());
+      allow list: if isSignedIn() && isActiveAccount() && (resource.data.published == true || isAdmin());
+      allow create: if isAdmin() && isActiveAccount() &&
+        isValidId(itemId) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().keys().hasAll([
+          'title', 'itemType', 'dayOfWeek', 'startTimeText', 'endTimeText', 'locationOrMode',
+          'published', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'title', 'itemType', 'dayOfWeek', 'startTimeText', 'endTimeText', 'locationOrMode',
+          'instructorName', 'departmentId', 'departmentName', 'academicYear', 'sectionName',
+          'courseId', 'videoUrl', 'dueAtMillis', 'published', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidScheduleItem(incoming());
+      allow update: if isAdmin() && isActiveAccount() &&
+        isValidId(itemId) &&
+        isValidScheduleItem(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'itemType', 'dayOfWeek', 'startTimeText', 'endTimeText', 'locationOrMode',
+          'instructorName', 'departmentId', 'departmentName', 'academicYear', 'sectionName',
+          'courseId', 'videoUrl', 'dueAtMillis', 'published', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isActiveAccount() && isValidId(itemId);
+    }
+
+    match /zoom_sessions/{sessionId} {
+      allow get: if isSignedIn() && isActiveAccount() && isValidId(sessionId) && (existing().published == true || isAdmin());
+      allow list: if isSignedIn() && isActiveAccount() && (resource.data.published == true || isAdmin());
+      allow create: if isAdmin() && isActiveAccount() &&
+        isValidId(sessionId) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().keys().hasAll([
+          'title', 'zoomUrl', 'scheduledAtMillis', 'durationMinutes', 'hostName',
+          'published', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'title', 'topic', 'zoomUrl', 'scheduledAtMillis', 'durationMinutes', 'hostName',
+          'departmentId', 'departmentName', 'academicYear', 'sectionName', 'courseId',
+          'published', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidZoomSession(incoming());
+      allow update: if isAdmin() && isActiveAccount() &&
+        isValidId(sessionId) &&
+        isValidZoomSession(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'topic', 'zoomUrl', 'scheduledAtMillis', 'durationMinutes', 'hostName',
+          'departmentId', 'departmentName', 'academicYear', 'sectionName', 'courseId',
+          'published', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isActiveAccount() && isValidId(sessionId);
+    }
+
+    match /instructions/{instructionId} {
+      allow get: if isSignedIn() && isActiveAccount() && isValidId(instructionId) && (existing().published == true || isAdmin());
+      allow list: if isSignedIn() && isActiveAccount() && (resource.data.published == true || isAdmin());
+      allow create: if isAdmin() && isActiveAccount() &&
+        isValidId(instructionId) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().keys().hasAll([
+          'title', 'body', 'priority', 'published', 'createdBy', 'createdByName', 'createdAt', 'updatedAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'title', 'body', 'priority', 'departmentId', 'departmentName', 'academicYear', 'sectionName',
+          'published', 'createdBy', 'createdByName', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidInstructionNotice(incoming());
+      allow update: if isAdmin() && isActiveAccount() &&
+        isValidId(instructionId) &&
+        isValidInstructionNotice(incoming()) &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'body', 'priority', 'departmentId', 'departmentName', 'academicYear', 'sectionName',
+          'published', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isActiveAccount() && isValidId(instructionId);
+    }
+
+    match /section_messages/{messageId} {
+      allow get, list: if isSignedIn() && isActiveAccount();
+      allow create: if isSignedIn() && isActiveAccount() &&
+        isValidId(messageId) &&
+        incoming().senderUid == request.auth.uid &&
+        (
+          incoming().senderRole == 'STUDENT' ||
+          (incoming().senderRole == 'ADMIN' && isAdmin()) ||
+          (incoming().senderRole == 'SUPER_ADMIN' && isSuperAdmin())
+        ) &&
+        (
+          isAdmin() ||
+          ((!('isPinned' in incoming()) || incoming().isPinned == false) && incoming().messageType == 'MESSAGE')
+        ) &&
+        incoming().keys().hasAll([
+          'departmentName', 'academicYear', 'sectionName',
+          'senderUid', 'senderName', 'senderRole', 'messageType', 'text', 'createdAt'
+        ]) &&
+        incoming().keys().hasOnly([
+          'departmentId', 'departmentName', 'academicYear', 'sectionName',
+          'senderUid', 'senderName', 'senderRole', 'messageType', 'isPinned', 'text', 'videoUrl', 'createdAt'
+        ]) &&
+        isValidSectionMessage(incoming());
+      allow update: if isAdmin() && isActiveAccount() &&
+        isValidId(messageId) &&
+        isValidSectionMessage(incoming()) &&
+        incoming().senderUid == existing().senderUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['isPinned', 'text', 'videoUrl']);
+      allow delete: if isSignedIn() && isActiveAccount() && isValidId(messageId) && (
+        existing().senderUid == request.auth.uid || isAdmin()
+      );
     }
 
     match /quizzes/{quizId} {
@@ -645,7 +956,6 @@ service cloud.firestore {
         ]);
       allow delete: if isAdmin() && isActiveAccount() && isValidId(quizId);
 
-      // Quiz Figure Image Chunks
       match /assets/{chunkId} {
         allow get, list: if isSignedIn() && isActiveAccount() && isValidId(quizId) && (
           isAdmin() ||
@@ -662,7 +972,6 @@ service cloud.firestore {
         allow delete: if isAdmin() && isActiveAccount() && isValidId(quizId) && isValidId(chunkId);
       }
 
-      // Split Collection: Protected Answer Key accessible ONLY to Active Admins/SuperAdmins
       match /private/{docId} {
         allow get, list: if isValidId(quizId) && isAdmin() && isActiveAccount();
         allow create: if isAdmin() && isActiveAccount() &&
@@ -723,7 +1032,6 @@ service cloud.firestore {
       allow delete: if isValidId(attemptId) && isSuperAdmin();
     }
 
-    // Security Audit Logs: Read strictly restricted to SUPER_ADMIN only (hidden from Students and Regular Admins)
     match /audit_logs/{logId} {
       allow get, list: if isSuperAdmin();
       allow create: if isSignedIn() &&
@@ -751,7 +1059,10 @@ service cloud.firestore {
         incoming().invitedBy == request.auth.uid &&
         incoming().status == 'PENDING' &&
         !('claimedByUid' in incoming()) &&
-        (incoming().assignedRole == 'STUDENT' || (incoming().assignedRole == 'ADMIN' && isSuperAdmin())) &&
+        (
+          incoming().assignedRole == 'STUDENT' ||
+          (incoming().assignedRole in ['ADMIN', 'SUPER_ADMIN'] && isSuperAdmin())
+        ) &&
         incoming().keys().hasAll([
           'email', 'displayNameHint', 'assignedRole', 'invitedBy', 'invitedByLabel', 'status', 'createdAt', 'updatedAt'
         ]) &&
@@ -807,9 +1118,6 @@ service cloud.firestore {
       allow delete: if isAdmin() && isActiveAccount() && isValidId(notificationId);
     }
 
-    // Tiered Support & Escalation Messaging:
-    // - Students -> Admins (STUDENT_TO_ADMIN)
-    // - Admins ONLY -> Super Admin (ADMIN_TO_SUPER)
     match /support_messages/{messageId} {
       allow get: if isSignedIn() && isActiveAccount() && isValidId(messageId) && (
         isSuperAdmin() ||
@@ -862,7 +1170,6 @@ service cloud.firestore {
       allow delete: if isValidId(messageId) && isSuperAdmin();
     }
 
-    // Department & Academic Year Student Group Chat Rooms
     match /chat_rooms/{roomId}/messages/{messageId} {
       allow get, list: if isSignedIn() && isActiveAccount() && isValidId(roomId);
       allow create: if isSignedIn() && isActiveAccount() &&
