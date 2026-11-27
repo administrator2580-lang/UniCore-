@@ -45,6 +45,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -57,6 +60,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 sealed interface UiState<out T> {
@@ -82,6 +87,7 @@ data class InAppFilePreview(
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class UniCoreViewModel(
+    private val appContext: Context,
     private val repository: UniCoreRepository,
     private val governance: UniCoreGovernanceRepository,
     private val aiRepository: AiTutorRepository,
@@ -90,8 +96,9 @@ class UniCoreViewModel(
     private val currentUserId: String
 ) : ViewModel() {
 
-    private val _sessionReady = MutableStateFlow(false)
-    private val _userRole = MutableStateFlow(UserRole.STUDENT)
+    private val cachedRoleInitial = UniCoreRepository.getCachedUserRole(appContext, currentUserId)
+    private val _sessionReady = MutableStateFlow(cachedRoleInitial != null)
+    private val _userRole = MutableStateFlow(cachedRoleInitial ?: UserRole.STUDENT)
     val userRole: StateFlow<UserRole> = _userRole.asStateFlow()
 
     private val _aiUiState = MutableStateFlow<AiUiState>(AiUiState.Idle)
@@ -105,6 +112,15 @@ class UniCoreViewModel(
 
     private val _isDriveRefreshing = MutableStateFlow(false)
     val isDriveRefreshing: StateFlow<Boolean> = _isDriveRefreshing.asStateFlow()
+
+    private val _downloadedDriveFileIds = MutableStateFlow<Set<String>>(emptySet())
+    val downloadedDriveFileIds: StateFlow<Set<String>> = _downloadedDriveFileIds.asStateFlow()
+
+    private val _downloadingOfflineIds = MutableStateFlow<Set<String>>(emptySet())
+    val downloadingOfflineIds: StateFlow<Set<String>> = _downloadingOfflineIds.asStateFlow()
+
+    private val _isBatchDownloadingOffline = MutableStateFlow(false)
+    val isBatchDownloadingOffline: StateFlow<Boolean> = _isBatchDownloadingOffline.asStateFlow()
 
     private val _openingCourseId = MutableStateFlow<String?>(null)
     val openingCourseId: StateFlow<String?> = _openingCourseId.asStateFlow()
@@ -121,17 +137,27 @@ class UniCoreViewModel(
     private var activeAiJob: Job? = null
 
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            val cachedIndex = driveSyncRepository.loadSyncedIndex(appContext)
+            if (cachedIndex.isNotEmpty() && (_driveFilesState.value as? UiState.Success)?.data.isNullOrEmpty()) {
+                _driveFilesState.value = UiState.Success(cachedIndex)
+            }
+            _downloadedDriveFileIds.value = driveSyncRepository.getDownloadedFileIds(appContext)
+        }
+
         viewModelScope.launch {
-            val res = repository.ensureUserSessionProfile(governance)
+            val res = repository.ensureUserSessionProfile(governance, appContext)
             res.onSuccess { resolvedRole ->
                 _userRole.value = resolvedRole
                 _sessionReady.value = true
             }.onFailure { err ->
                 Log.e(TAG, "Session bootstrap failed", err)
-                _statusBanner.value = InputValidator.safeUserErrorMessage(
-                    err,
-                    "Could not verify session profile."
-                )
+                if (!_sessionReady.value) {
+                    _statusBanner.value = InputValidator.safeUserErrorMessage(
+                        err,
+                        "Could not verify session profile."
+                    )
+                }
                 _sessionReady.value = true
             }
         }
@@ -193,10 +219,10 @@ class UniCoreViewModel(
     val driveFoldersState: StateFlow<UiState<List<DriveFolderLink>>> =
         isActiveSessionFlow
             .flatMapLatest { active ->
-                if (!active) flowOf(UiState.Success(emptyList()))
+                if (!active) flowOf(UiState.Loading)
                 else governance.observeDriveFolders().asUiState("drive_folders")
             }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Success(emptyList()))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), UiState.Loading)
 
     val departmentsState: StateFlow<UiState<List<AcademicDepartment>>> =
         isActiveSessionFlow
@@ -613,17 +639,111 @@ class UniCoreViewModel(
     private suspend fun refreshDriveFiles(folders: List<DriveFolderLink>) {
         if (folders.isEmpty()) {
             _driveFilesState.value = UiState.Success(emptyList())
+            driveSyncRepository.saveSyncedIndex(appContext, emptyList())
             return
         }
         _isDriveRefreshing.value = true
         try {
             val res = driveSyncRepository.syncDriveFolders(folders)
-            _driveFilesState.value = res.fold(
-                onSuccess = { UiState.Success(it) },
-                onFailure = { UiState.Error(InputValidator.safeUserErrorMessage(it, it.message ?: "Drive sync failed.")) }
-            )
+            res.onSuccess { synced ->
+                _driveFilesState.value = UiState.Success(synced)
+                driveSyncRepository.saveSyncedIndex(appContext, synced)
+                _downloadedDriveFileIds.value = driveSyncRepository.getDownloadedFileIds(appContext)
+            }.onFailure { err ->
+                val cached = (_driveFilesState.value as? UiState.Success)?.data.orEmpty()
+                if (cached.isEmpty()) {
+                    val diskCached = driveSyncRepository.loadSyncedIndex(appContext)
+                    if (diskCached.isNotEmpty()) {
+                        _driveFilesState.value = UiState.Success(diskCached)
+                    } else {
+                        _driveFilesState.value = UiState.Error(
+                            InputValidator.safeUserErrorMessage(err, err.message ?: "Drive sync failed.")
+                        )
+                    }
+                }
+            }
         } finally {
             _isDriveRefreshing.value = false
+        }
+    }
+
+    fun saveDriveFileOffline(context: Context, item: DriveSyncedFile) {
+        viewModelScope.launch {
+            _downloadingOfflineIds.value = _downloadingOfflineIds.value + item.fileId
+            try {
+                val res = driveSyncRepository.downloadDriveFile(context, item, exportToDownloads = false)
+                res.onSuccess { outcome ->
+                    when (outcome) {
+                        is GoogleDriveSyncRepository.DriveOpenOutcome.LocalFileReady -> {
+                            _downloadedDriveFileIds.value = _downloadedDriveFileIds.value + item.fileId
+                            _statusBanner.value = "تم الحفظ للقراءة بدون نت: ${outcome.file.name}"
+                        }
+                        is GoogleDriveSyncRepository.DriveOpenOutcome.FallbackToBrowser -> {
+                            _statusBanner.value = "تعذر حفظ الملف بدون نت: ${item.name}"
+                        }
+                    }
+                }.onFailure { err ->
+                    _statusBanner.value = InputValidator.safeUserErrorMessage(err, err.message ?: "Could not save offline file.")
+                }
+            } finally {
+                _downloadingOfflineIds.value = _downloadingOfflineIds.value - item.fileId
+            }
+        }
+    }
+
+    fun removeDriveFileOffline(context: Context, item: DriveSyncedFile) {
+        viewModelScope.launch {
+            val removed = driveSyncRepository.deleteOfflineFile(context, item.fileId)
+            if (removed) {
+                _downloadedDriveFileIds.value = _downloadedDriveFileIds.value - item.fileId
+                _statusBanner.value = "تم حذف النسخة المحفوظة: ${item.name}"
+            }
+        }
+    }
+
+    fun downloadAllDriveFilesOffline(context: Context, items: List<DriveSyncedFile>) {
+        val pending = items.filter { !it.isSubFolder && it.fileId !in _downloadedDriveFileIds.value }
+        if (pending.isEmpty()) {
+            _statusBanner.value = "جميع الملفات المعروضة محفوظة بالفعل بدون نت."
+            return
+        }
+        viewModelScope.launch {
+            _isBatchDownloadingOffline.value = true
+            try {
+                val semaphore = Semaphore(3)
+                var savedCount = 0
+                coroutineScope {
+                    pending.map { item ->
+                        async {
+                            semaphore.withPermit {
+                                _downloadingOfflineIds.value = _downloadingOfflineIds.value + item.fileId
+                                try {
+                                    val res = driveSyncRepository.downloadDriveFile(
+                                        context = context,
+                                        item = item,
+                                        exportToDownloads = false
+                                    )
+                                    val outcome = res.getOrNull()
+                                    if (outcome is GoogleDriveSyncRepository.DriveOpenOutcome.LocalFileReady) {
+                                        _downloadedDriveFileIds.value = _downloadedDriveFileIds.value + item.fileId
+                                        synchronized(this@coroutineScope) { savedCount++ }
+                                    }
+                                } finally {
+                                    _downloadingOfflineIds.value = _downloadingOfflineIds.value - item.fileId
+                                }
+                            }
+                        }
+                    }.awaitAll()
+                }
+                _downloadedDriveFileIds.value = driveSyncRepository.getDownloadedFileIds(context)
+                _statusBanner.value = if (savedCount > 0) {
+                    "تم تنزيل $savedCount ملف للمذاكرة بدون نت."
+                } else {
+                    "تعذر تنزيل الملفات بدون نت، تأكد من الاتصال."
+                }
+            } finally {
+                _isBatchDownloadingOffline.value = false
+            }
         }
     }
 
@@ -631,14 +751,22 @@ class UniCoreViewModel(
         viewModelScope.launch {
             _openingDriveFileId.value = item.fileId
             try {
-                val res = driveSyncRepository.downloadDriveFile(context, item)
+                val alreadyOffline = item.fileId in _downloadedDriveFileIds.value
+                val res = driveSyncRepository.downloadDriveFile(
+                    context = context,
+                    item = item,
+                    exportToDownloads = !alreadyOffline
+                )
                 res.onSuccess { outcome ->
                     when (outcome) {
                         is GoogleDriveSyncRepository.DriveOpenOutcome.LocalFileReady -> {
-                            _statusBanner.value = if (outcome.savedToDownloads) {
-                                "Downloaded: ${outcome.file.name} (Downloads/UniCore)"
-                            } else {
-                                "Downloaded: ${outcome.file.name}"
+                            _downloadedDriveFileIds.value = _downloadedDriveFileIds.value + item.fileId
+                            if (!alreadyOffline) {
+                                _statusBanner.value = if (outcome.savedToDownloads) {
+                                    "Saved offline & Downloads/UniCore: ${outcome.file.name}"
+                                } else {
+                                    "Saved offline: ${outcome.file.name}"
+                                }
                             }
                             if (outcome.mimeType == "application/pdf" || outcome.mimeType.startsWith("image/")) {
                                 _inAppPreviewFile.value = InAppFilePreview(
@@ -651,7 +779,7 @@ class UniCoreViewModel(
                                     context, outcome.file, outcome.mimeType
                                 )
                                 if (openRes.isFailure) {
-                                    _statusBanner.value = "Saved '${outcome.file.name}' in Downloads/UniCore."
+                                    _statusBanner.value = "Saved '${outcome.file.name}' offline."
                                 }
                             }
                         }

@@ -47,6 +47,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -63,6 +64,8 @@ import com.example.data.model.StudyChatMessage
 import com.example.data.model.UserRole
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.viewmodel.UiState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun StudyChatScreen(
@@ -307,24 +310,33 @@ fun StudyChatScreen(
                                                 )
                                             }
 
-                                            val bmp = remember(msg.id, msg.attachmentBase64) {
-                                                msg.attachmentBase64?.let { b64 ->
-                                                    runCatching {
-                                                        val bytes = Base64.decode(b64, Base64.DEFAULT)
-                                                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                                    }.getOrNull()
+                                            val bmp by produceState<Bitmap?>(
+                                                initialValue = null,
+                                                key1 = msg.id,
+                                                key2 = msg.attachmentBase64
+                                            ) {
+                                                val b64 = msg.attachmentBase64
+                                                value = if (b64.isNullOrBlank()) {
+                                                    null
+                                                } else {
+                                                    withContext(Dispatchers.IO) {
+                                                        runCatching {
+                                                            val bytes = Base64.decode(b64, Base64.DEFAULT)
+                                                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                                        }.getOrNull()
+                                                    }
                                                 }
                                             }
-                                            if (bmp != null) {
+                                            bmp?.let { decodedBmp ->
                                                 Image(
-                                                    bitmap = bmp.asImageBitmap(),
+                                                    bitmap = decodedBmp.asImageBitmap(),
                                                     contentDescription = msg.attachmentName ?: "Chat attachment",
                                                     contentScale = ContentScale.Crop,
                                                     modifier = Modifier
                                                         .fillMaxWidth()
                                                         .heightIn(max = 220.dp)
                                                         .clip(MaterialTheme.shapes.small)
-                                                        .clickable { zoomedImageBitmap = bmp }
+                                                        .clickable { zoomedImageBitmap = decodedBmp }
                                                 )
                                             }
                                         }

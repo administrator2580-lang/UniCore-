@@ -31,6 +31,8 @@ import com.google.firebase.firestore.snapshots
 import android.util.Base64
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emitAll
@@ -57,6 +59,16 @@ class UniCoreRepository(
         const val BOOTSTRAPPED_SUPER_ADMIN_EMAIL = "fvathyvhmed@gmail.com"
         const val MAX_INLINE_COURSE_FILE_BYTES = 2_097_152L // 2 MB Spark-plan chunk limit
         private const val CHUNK_RAW_BYTES = 512 * 1024 // 512 KB raw -> ~683 KB Base64 (< 750 KB rule)
+        private const val FAST_SESSION_PREFS = "unicore_fast_session"
+
+        fun getCachedUserRole(context: Context, uid: String): UserRole? {
+            if (uid.isBlank()) return null
+            val raw = context.applicationContext
+                .getSharedPreferences(FAST_SESSION_PREFS, Context.MODE_PRIVATE)
+                .getString("role_$uid", null)
+                ?: return null
+            return UserRole.entries.firstOrNull { it.name == raw }
+        }
     }
 
     internal fun requireUserId(): String {
@@ -66,33 +78,55 @@ class UniCoreRepository(
 
     /**
      * Ensures user profile, private PII, and any pending email-based role invite are synced
-     * cleanly in strict order before marking the invite CLAIMED.
+     * cleanly using parallelized Firestore lookups and local fast-session caching.
      */
-    suspend fun ensureUserSessionProfile(governance: UniCoreGovernanceRepository): Result<UserRole> {
+    suspend fun ensureUserSessionProfile(
+        governance: UniCoreGovernanceRepository,
+        context: Context? = null
+    ): Result<UserRole> {
         val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Not authenticated"))
         val user = auth.currentUser!!
+        val prefs = context?.applicationContext?.getSharedPreferences(FAST_SESSION_PREFS, Context.MODE_PRIVATE)
         return try {
             val today = ZeroCostQuotaManager.currentUtcDayKey()
             val normalizedEmail = user.email?.trim()?.lowercase(Locale.ROOT)
             val isBootstrappedSuperAdmin =
                 normalizedEmail == BOOTSTRAPPED_SUPER_ADMIN_EMAIL && user.isEmailVerified
 
-            val pendingInvite: RoleInvite? = if (!normalizedEmail.isNullOrBlank() && user.isEmailVerified) {
-                runCatching {
-                    val snap = db.collection("role_invites").document(normalizedEmail).get().await()
-                    snap.toObject(RoleInvite::class.java)?.takeIf { it.status == "PENDING" }
-                }.getOrNull()
-            } else {
-                null
+            val (pendingInvite, hasSuperAdminDoc, hasAdminDoc, userSnap) = coroutineScope {
+                val inviteDeferred = async {
+                    if (!normalizedEmail.isNullOrBlank() && user.isEmailVerified) {
+                        runCatching {
+                            val snap = db.collection("role_invites").document(normalizedEmail).get().await()
+                            snap.toObject(RoleInvite::class.java)?.takeIf { it.status == "PENDING" }
+                        }.getOrNull()
+                    } else {
+                        null
+                    }
+                }
+                val superDeferred = async {
+                    if (isBootstrappedSuperAdmin) true
+                    else runCatching {
+                        db.collection("super_admins").document(uid).get().await().exists()
+                    }.getOrDefault(false)
+                }
+                val adminDeferred = async {
+                    runCatching {
+                        db.collection("admins").document(uid).get().await().exists()
+                    }.getOrDefault(false)
+                }
+                val userSnapDeferred = async {
+                    runCatching {
+                        db.collection("users").document(uid).get().await()
+                    }.getOrNull()
+                }
+                BootstrapSnapshot(
+                    pendingInvite = inviteDeferred.await(),
+                    hasSuperAdminDoc = superDeferred.await(),
+                    hasAdminDoc = adminDeferred.await(),
+                    userSnap = userSnapDeferred.await()
+                )
             }
-
-            val hasSuperAdminDoc = runCatching {
-                db.collection("super_admins").document(uid).get().await().exists()
-            }.getOrDefault(false)
-
-            val hasAdminDoc = runCatching {
-                db.collection("admins").document(uid).get().await().exists()
-            }.getOrDefault(false)
 
             val hasPendingAdminInvite = pendingInvite?.assignedRole == UserRole.ADMIN.name
 
@@ -102,32 +136,35 @@ class UniCoreRepository(
                 else -> UserRole.STUDENT
             }
 
-            if (isBootstrappedSuperAdmin) {
-                val superRef = db.collection("super_admins").document(uid)
-                if (!superRef.get().await().exists()) {
-                    superRef.set(
-                        mapOf(
-                            "userId" to uid,
-                            "email" to (normalizedEmail ?: BOOTSTRAPPED_SUPER_ADMIN_EMAIL),
-                            "createdAt" to FieldValue.serverTimestamp(),
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).await()
-                }
-                val settingsRef = db.collection("system_settings").document("global")
-                if (!settingsRef.get().await().exists()) {
-                    settingsRef.set(
-                        mapOf(
-                            "dailyAiLimitPerUser" to 20L,
-                            "dailyWriteLimitPerUser" to 100L,
-                            "maxFileUploadBytes" to 5_242_880L,
-                            "aiEnabled" to true,
-                            "zeroCostLockActive" to false,
-                            "updatedBy" to uid,
-                            "createdAt" to FieldValue.serverTimestamp(),
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        )
-                    ).await()
+            if (isBootstrappedSuperAdmin && prefs?.getBoolean("super_bootstrapped_$uid", false) != true) {
+                runCatching {
+                    val superRef = db.collection("super_admins").document(uid)
+                    if (!superRef.get().await().exists()) {
+                        superRef.set(
+                            mapOf(
+                                "userId" to uid,
+                                "email" to (normalizedEmail ?: BOOTSTRAPPED_SUPER_ADMIN_EMAIL),
+                                "createdAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                    val settingsRef = db.collection("system_settings").document("global")
+                    if (!settingsRef.get().await().exists()) {
+                        settingsRef.set(
+                            mapOf(
+                                "dailyAiLimitPerUser" to 20L,
+                                "dailyWriteLimitPerUser" to 100L,
+                                "maxFileUploadBytes" to 5_242_880L,
+                                "aiEnabled" to true,
+                                "zeroCostLockActive" to false,
+                                "updatedBy" to uid,
+                                "createdAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                    prefs?.edit()?.putBoolean("super_bootstrapped_$uid", true)?.apply()
                 }
             }
 
@@ -146,7 +183,6 @@ class UniCoreRepository(
 
             // Step 2: Create or update /users/{uid} (role promotion rule also requires PENDING invite)
             val userRef = db.collection("users").document(uid)
-            val snap = userRef.get().await()
             val cleanName = InputValidator.sanitizeText(
                 user.displayName ?: pendingInvite?.displayNameHint ?: "UniCore Learner"
             )
@@ -154,7 +190,7 @@ class UniCoreRepository(
                 .ifBlank { "UniCore Learner" }
                 .let { if (it.length < 2) "Learner" else it }
 
-            if (!snap.exists()) {
+            if (userSnap != null && !userSnap.exists()) {
                 userRef.set(
                     mapOf(
                         "userId" to uid,
@@ -167,9 +203,9 @@ class UniCoreRepository(
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                 ).await()
-            } else {
-                val existingDay = snap.getString("quotaDayKey") ?: ""
-                val existingRole = snap.getString("role") ?: UserRole.STUDENT.name
+            } else if (userSnap != null && userSnap.exists()) {
+                val existingDay = userSnap.getString("quotaDayKey") ?: ""
+                val existingRole = userSnap.getString("role") ?: UserRole.STUDENT.name
                 val updates = mutableMapOf<String, Any>(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -182,7 +218,7 @@ class UniCoreRepository(
                     updates["role"] = UserRole.ADMIN.name
                 }
                 if (updates.size > 1) {
-                    userRef.update(updates).await()
+                    runCatching { userRef.update(updates).await() }
                 }
             }
 
@@ -199,35 +235,64 @@ class UniCoreRepository(
                 }
             }
 
-            // Step 4: Store PII isolated in /users/{uid}/private/pii
-            val piiRef = userRef.collection("private").document("pii")
-            val email = (normalizedEmail ?: "unknown@unicore.edu").take(120)
-            if (!piiRef.get().await().exists()) {
-                piiRef.set(
-                    mapOf(
-                        "userId" to uid,
-                        "email" to email,
-                        "createdAt" to FieldValue.serverTimestamp(),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                ).await()
+            // Step 4: Store PII isolated in /users/{uid}/private/pii (skip lookup if already cached locally)
+            if (prefs?.getBoolean("pii_saved_$uid", false) != true) {
+                runCatching {
+                    val piiRef = userRef.collection("private").document("pii")
+                    val email = (normalizedEmail ?: "unknown@unicore.edu").take(120)
+                    if (!piiRef.get().await().exists()) {
+                        piiRef.set(
+                            mapOf(
+                                "userId" to uid,
+                                "email" to email,
+                                "createdAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                        ).await()
+                    }
+                    prefs?.edit()?.putBoolean("pii_saved_$uid", true)?.apply()
+                }
             }
 
-            governance.logAuditEvent(
-                action = "AUTH_SUCCESS",
-                severity = AuditSeverity.INFO,
-                targetPath = "users/$uid",
-                details = "Authenticated session initialized with role ${resolvedRole.name}."
-            )
+            val effectiveRole = when {
+                resolvedRole != UserRole.STUDENT -> resolvedRole
+                else -> UserRole.fromRaw(userSnap?.getString("role"))
+            }
 
-            Result.success(resolvedRole)
+            prefs?.edit()?.putString("role_$uid", effectiveRole.name)?.apply()
+
+            if (prefs?.getString("last_audit_day_$uid", null) != today) {
+                runCatching {
+                    governance.logAuditEvent(
+                        action = "AUTH_SUCCESS",
+                        severity = AuditSeverity.INFO,
+                        targetPath = "users/$uid",
+                        details = "Authenticated session initialized with role ${effectiveRole.name}."
+                    )
+                    prefs?.edit()?.putString("last_audit_day_$uid", today)?.apply()
+                }
+            }
+
+            Result.success(effectiveRole)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.WRITE, "users/$uid")
-            Result.failure(e)
+            val fallbackRole = prefs?.let { getCachedUserRole(context, uid) }
+            if (fallbackRole != null) {
+                Result.success(fallbackRole)
+            } else {
+                handleFirestoreError(e, OperationType.WRITE, "users/$uid")
+                Result.failure(e)
+            }
         }
     }
+
+    private data class BootstrapSnapshot(
+        val pendingInvite: RoleInvite?,
+        val hasSuperAdminDoc: Boolean,
+        val hasAdminDoc: Boolean,
+        val userSnap: DocumentSnapshot?
+    )
 
     fun observeUserProfile(userId: String): Flow<UserProfile?> = flow {
         val uid = requireUserId()

@@ -37,13 +37,17 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadForOffline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.OfflinePin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Search
@@ -96,6 +100,8 @@ import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.viewmodel.InAppFilePreview
 import com.example.ui.viewmodel.UiState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -105,6 +111,9 @@ fun CoursesScreen(
     driveFoldersState: UiState<List<DriveFolderLink>>,
     driveFilesState: UiState<List<DriveSyncedFile>>,
     isDriveRefreshing: Boolean,
+    downloadedDriveFileIds: Set<String> = emptySet(),
+    downloadingOfflineIds: Set<String> = emptySet(),
+    isBatchDownloadingOffline: Boolean = false,
     openingCourseId: String?,
     openingDriveFileId: String?,
     userRole: UserRole,
@@ -118,7 +127,10 @@ fun CoursesScreen(
     onUpdateDriveFolder: (String, String, String, String?, String?, String?) -> Unit,
     onUnlinkDriveFolder: (String) -> Unit,
     onRefreshDrive: () -> Unit,
-    onOpenDriveFile: (DriveSyncedFile) -> Unit
+    onOpenDriveFile: (DriveSyncedFile) -> Unit,
+    onSaveDriveFileOffline: (DriveSyncedFile) -> Unit = {},
+    onRemoveDriveFileOffline: (DriveSyncedFile) -> Unit = {},
+    onDownloadAllOffline: (List<DriveSyncedFile>) -> Unit = {}
 ) {
     val context = LocalContext.current
     val strings = LocalAppStrings.current
@@ -370,12 +382,18 @@ fun CoursesScreen(
                         hasConfiguredFolders = allDriveFolders.isNotEmpty(),
                         driveFilesState = scopedDriveFilesState,
                         isRefreshing = isDriveRefreshing,
+                        downloadedDriveFileIds = downloadedDriveFileIds,
+                        downloadingOfflineIds = downloadingOfflineIds,
+                        isBatchDownloadingOffline = isBatchDownloadingOffline,
                         openingDriveFileId = openingDriveFileId,
                         isSuperAdmin = isSuperAdmin,
                         searchQuery = searchQuery,
                         onOpenStorageManager = { showStorageManagerDialog = true },
                         onRefreshDrive = onRefreshDrive,
-                        onOpenDriveFile = onOpenDriveFile
+                        onOpenDriveFile = onOpenDriveFile,
+                        onSaveDriveFileOffline = onSaveDriveFileOffline,
+                        onRemoveDriveFileOffline = onRemoveDriveFileOffline,
+                        onDownloadAllOffline = onDownloadAllOffline
                     )
                 }
             }
@@ -533,15 +551,22 @@ private fun StudyLibrarySectionCard(
     hasConfiguredFolders: Boolean,
     driveFilesState: UiState<List<DriveSyncedFile>>,
     isRefreshing: Boolean,
+    downloadedDriveFileIds: Set<String>,
+    downloadingOfflineIds: Set<String>,
+    isBatchDownloadingOffline: Boolean,
     openingDriveFileId: String?,
     isSuperAdmin: Boolean,
     searchQuery: String,
     onOpenStorageManager: () -> Unit,
     onRefreshDrive: () -> Unit,
-    onOpenDriveFile: (DriveSyncedFile) -> Unit
+    onOpenDriveFile: (DriveSyncedFile) -> Unit,
+    onSaveDriveFileOffline: (DriveSyncedFile) -> Unit,
+    onRemoveDriveFileOffline: (DriveSyncedFile) -> Unit,
+    onDownloadAllOffline: (List<DriveSyncedFile>) -> Unit
 ) {
     val strings = LocalAppStrings.current
     var selectedSection by remember { mutableStateOf<String?>(null) }
+    var offlineOnly by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -615,8 +640,12 @@ private fun StudyLibrarySectionCard(
                     }
                 }
                 is UiState.Success -> {
-                    val sections = remember(driveFilesState.data) {
-                        driveFilesState.data
+                    val allFiles = driveFilesState.data
+                    val offlineCount = remember(allFiles, downloadedDriveFileIds) {
+                        allFiles.count { it.fileId in downloadedDriveFileIds }
+                    }
+                    val sections = remember(allFiles) {
+                        allFiles
                             .map { it.subFolderPath.ifBlank { it.rootFolderTitle.ifBlank { it.folderTitle } } }
                             .filter { it.isNotBlank() }
                             .distinct()
@@ -627,39 +656,82 @@ private fun StudyLibrarySectionCard(
                         }
                     }
 
-                    if (sections.size > 1) {
+                    if (allFiles.isNotEmpty()) {
                         Row(
                             modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             FilterChip(
-                                selected = selectedSection == null,
-                                onClick = { selectedSection = null },
+                                selected = selectedSection == null && !offlineOnly,
+                                onClick = {
+                                    selectedSection = null
+                                    offlineOnly = false
+                                },
                                 label = { Text(strings.allTypes) }
                             )
-                            sections.forEach { section ->
-                                FilterChip(
-                                    selected = selectedSection == section,
-                                    onClick = {
-                                        selectedSection = if (selectedSection == section) null else section
-                                    },
-                                    label = { Text(section) }
-                                )
+                            FilterChip(
+                                selected = offlineOnly,
+                                onClick = { offlineOnly = !offlineOnly },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.OfflinePin,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                },
+                                label = { Text("${strings.offlineOnlyFilter} ($offlineCount)") },
+                                modifier = Modifier.testTag("drive_offline_filter_chip")
+                            )
+                            if (sections.size > 1) {
+                                sections.forEach { section ->
+                                    FilterChip(
+                                        selected = selectedSection == section,
+                                        onClick = {
+                                            selectedSection = if (selectedSection == section) null else section
+                                        },
+                                        label = { Text(section) }
+                                    )
+                                }
                             }
                         }
                     }
 
-                    val filteredFiles = remember(driveFilesState.data, searchQuery, selectedSection) {
-                        driveFilesState.data.filter { fileItem ->
+                    val filteredFiles = remember(allFiles, searchQuery, selectedSection, offlineOnly, downloadedDriveFileIds) {
+                        allFiles.filter { fileItem ->
                             val itemSection = fileItem.subFolderPath.ifBlank {
                                 fileItem.rootFolderTitle.ifBlank { fileItem.folderTitle }
                             }
                             val matchesSection = selectedSection == null || itemSection == selectedSection
+                            val matchesOffline = !offlineOnly || fileItem.fileId in downloadedDriveFileIds
                             val q = searchQuery.trim()
                             val matchesQuery = q.isBlank() ||
                                 fileItem.name.contains(q, ignoreCase = true) ||
                                 itemSection.contains(q, ignoreCase = true)
-                            matchesSection && matchesQuery
+                            matchesSection && matchesOffline && matchesQuery
+                        }
+                    }
+
+                    val pendingOfflineCount = remember(filteredFiles, downloadedDriveFileIds) {
+                        filteredFiles.count { !it.isSubFolder && it.fileId !in downloadedDriveFileIds }
+                    }
+                    if (pendingOfflineCount > 0) {
+                        FilledTonalButton(
+                            onClick = { onDownloadAllOffline(filteredFiles) },
+                            enabled = !isBatchDownloadingOffline,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("drive_download_all_offline_button")
+                        ) {
+                            if (isBatchDownloadingOffline) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.size(8.dp))
+                                Text(strings.downloadingLabel)
+                            } else {
+                                Icon(Icons.Default.DownloadForOffline, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.size(6.dp))
+                                Text("${strings.saveAllOfflineAction} ($pendingOfflineCount)")
+                            }
                         }
                     }
 
@@ -675,6 +747,10 @@ private fun StudyLibrarySectionCard(
                                 val itemSection = fileItem.subFolderPath.ifBlank {
                                     fileItem.rootFolderTitle.ifBlank { fileItem.folderTitle }
                                 }
+                                val isOffline = fileItem.fileId in downloadedDriveFileIds
+                                val isSavingOffline = fileItem.fileId in downloadingOfflineIds
+                                val isOpening = openingDriveFileId == fileItem.fileId
+
                                 Surface(
                                     color = MaterialTheme.colorScheme.surface,
                                     shape = MaterialTheme.shapes.small,
@@ -703,36 +779,108 @@ private fun StudyLibrarySectionCard(
                                                 tint = MaterialTheme.colorScheme.primary,
                                                 modifier = Modifier.size(20.dp)
                                             )
-                                            Column {
+                                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                                 Text(
                                                     text = fileItem.name,
                                                     style = MaterialTheme.typography.titleSmall,
                                                     maxLines = 2,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
-                                                if (itemSection.isNotBlank()) {
-                                                    Text(
-                                                        text = itemSection,
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = MaterialTheme.colorScheme.primary
-                                                    )
+                                                Row(
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    if (itemSection.isNotBlank()) {
+                                                        Text(
+                                                            text = itemSection,
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            modifier = Modifier.weight(1f, fill = false)
+                                                        )
+                                                    }
+                                                    if (isOffline) {
+                                                        Surface(
+                                                            color = MaterialTheme.colorScheme.secondaryContainer,
+                                                            shape = MaterialTheme.shapes.extraSmall
+                                                        ) {
+                                                            Row(
+                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                                            ) {
+                                                                Icon(
+                                                                    Icons.Default.OfflinePin,
+                                                                    contentDescription = null,
+                                                                    tint = MaterialTheme.colorScheme.secondary,
+                                                                    modifier = Modifier.size(12.dp)
+                                                                )
+                                                                Text(
+                                                                    text = strings.offlineReadyBadge,
+                                                                    style = MaterialTheme.typography.labelSmall,
+                                                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                                                )
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
-                                        OutlinedButton(
-                                            onClick = { onOpenDriveFile(fileItem) },
-                                            enabled = openingDriveFileId != fileItem.fileId
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                                         ) {
-                                            if (openingDriveFileId == fileItem.fileId) {
-                                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                            } else {
-                                                Icon(
-                                                    Icons.Default.Download,
-                                                    contentDescription = strings.downloadAndOpenFile,
-                                                    modifier = Modifier.size(16.dp)
-                                                )
-                                                Spacer(Modifier.size(4.dp))
-                                                Text(strings.downloadAndOpenFile, maxLines = 1)
+                                            IconButton(
+                                                onClick = {
+                                                    if (isOffline) {
+                                                        onRemoveDriveFileOffline(fileItem)
+                                                    } else {
+                                                        onSaveDriveFileOffline(fileItem)
+                                                    }
+                                                },
+                                                enabled = !isSavingOffline && !isOpening,
+                                                modifier = Modifier.testTag("drive_offline_${fileItem.fileId}")
+                                            ) {
+                                                when {
+                                                    isSavingOffline -> CircularProgressIndicator(
+                                                        modifier = Modifier.size(18.dp),
+                                                        strokeWidth = 2.dp
+                                                    )
+                                                    isOffline -> Icon(
+                                                        Icons.Default.DeleteOutline,
+                                                        contentDescription = strings.removeOfflineAction,
+                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                    else -> Icon(
+                                                        Icons.Default.DownloadForOffline,
+                                                        contentDescription = strings.saveOfflineAction,
+                                                        tint = MaterialTheme.colorScheme.secondary,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                }
+                                            }
+
+                                            OutlinedButton(
+                                                onClick = { onOpenDriveFile(fileItem) },
+                                                enabled = !isOpening,
+                                                modifier = Modifier.testTag("drive_open_${fileItem.fileId}")
+                                            ) {
+                                                if (isOpening) {
+                                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                                } else {
+                                                    Icon(
+                                                        if (isOffline) Icons.Default.CloudDone else Icons.Default.Download,
+                                                        contentDescription = if (isOffline) strings.openOfflineAction else strings.downloadAndOpenFile,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Spacer(Modifier.size(4.dp))
+                                                    Text(
+                                                        text = if (isOffline) strings.openOfflineAction else strings.downloadAndOpenFile,
+                                                        maxLines = 1
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -1643,27 +1791,66 @@ fun InAppFilePreviewDialog(
 
     val isPdf = preview.mimeType == "application/pdf"
 
+    val pageCache = remember(preview.file.absolutePath) {
+        object : LinkedHashMap<Int, Bitmap>(6, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Bitmap>?): Boolean = size > 5
+        }
+    }
+    val renderMutex = remember(preview.file.absolutePath) { Mutex() }
+    val pdfSession = remember(preview.file.absolutePath, isPdf) {
+        if (!isPdf) null
+        else runCatching {
+            val pfd = ParcelFileDescriptor.open(preview.file, ParcelFileDescriptor.MODE_READ_ONLY)
+            val renderer = PdfRenderer(pfd)
+            pfd to renderer
+        }.getOrNull()
+    }
+
     LaunchedEffect(preview.file.absolutePath, pageIndex) {
         previewError = null
         if (isPdf) {
+            val cached = pageCache[pageIndex]
+            if (cached != null) {
+                pdfPageBitmap = cached
+            }
             withContext(Dispatchers.IO) {
                 runCatching {
-                    ParcelFileDescriptor.open(preview.file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
-                        PdfRenderer(pfd).use { renderer ->
-                            val count = renderer.pageCount
-                            pageCount = count
-                            if (count > 0) {
-                                val safeIndex = pageIndex.coerceIn(0, count - 1)
-                                renderer.openPage(safeIndex).use { page ->
-                                    val scale = 2
-                                    val bmp = Bitmap.createBitmap(
-                                        (page.width * scale).coerceIn(300, 1800),
-                                        (page.height * scale).coerceIn(400, 2400),
-                                        Bitmap.Config.ARGB_8888
-                                    )
-                                    bmp.eraseColor(android.graphics.Color.WHITE)
-                                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                                    pdfPageBitmap = bmp
+                    val session = pdfSession ?: error("Could not open PDF renderer.")
+                    val renderer = session.second
+                    val count = renderer.pageCount
+                    pageCount = count
+                    if (count > 0) {
+                        val safeIndex = pageIndex.coerceIn(0, count - 1)
+                        val rendered = renderMutex.withLock {
+                            pageCache[safeIndex] ?: renderer.openPage(safeIndex).use { page ->
+                                val targetWidth = (page.width * 2).coerceIn(360, 1280)
+                                val targetHeight = ((page.height.toFloat() / page.width.coerceAtLeast(1)) * targetWidth)
+                                    .toInt()
+                                    .coerceIn(400, 1920)
+                                val bmp = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+                                bmp.eraseColor(android.graphics.Color.WHITE)
+                                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                pageCache[safeIndex] = bmp
+                                bmp
+                            }
+                        }
+                        pdfPageBitmap = rendered
+
+                        // Preload next page smoothly for instant Next navigation
+                        val nextIdx = safeIndex + 1
+                        if (nextIdx < count && !pageCache.containsKey(nextIdx)) {
+                            renderMutex.withLock {
+                                if (!pageCache.containsKey(nextIdx)) {
+                                    renderer.openPage(nextIdx).use { nextPage ->
+                                        val w = (nextPage.width * 2).coerceIn(360, 1280)
+                                        val h = ((nextPage.height.toFloat() / nextPage.width.coerceAtLeast(1)) * w)
+                                            .toInt()
+                                            .coerceIn(400, 1920)
+                                        val nextBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                                        nextBmp.eraseColor(android.graphics.Color.WHITE)
+                                        nextPage.render(nextBmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                        pageCache[nextIdx] = nextBmp
+                                    }
                                 }
                             }
                         }
@@ -1690,6 +1877,9 @@ fun InAppFilePreviewDialog(
 
     DisposableEffect(preview.file.absolutePath) {
         onDispose {
+            runCatching { pdfSession?.second?.close() }
+            runCatching { pdfSession?.first?.close() }
+            pageCache.clear()
             imageBitmap = null
             pdfPageBitmap = null
         }

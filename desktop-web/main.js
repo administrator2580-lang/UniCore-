@@ -121,6 +121,10 @@ function startStaticDistServer(distDir) {
   return tryPort(0);
 }
 
+const keepAliveAgent = new https.Agent({ keepAlive: true, maxSockets: 10 });
+const DRIVE_INDEX_FILE = 'drive_index.json';
+const DRIVE_SYNC_CONCURRENCY = 6;
+
 function fetchHttpsText(urlString, redirectsLeft = 4) {
   return new Promise((resolve, reject) => {
     const parsed = validateHttpsUrl(urlString);
@@ -132,7 +136,8 @@ function fetchHttpsText(urlString, redirectsLeft = 4) {
     const req = https.get(
       parsed,
       {
-        timeout: 15000,
+        agent: keepAliveAgent,
+        timeout: 9000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36'
         }
@@ -223,7 +228,8 @@ function downloadHttpsBinary(urlString, resolveDestPath, redirectsLeft = 6) {
     const req = https.get(
       parsed,
       {
-        timeout: 25000,
+        agent: keepAliveAgent,
+        timeout: 16000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36'
         }
@@ -436,66 +442,90 @@ function parseEmbeddedFolderHtml(html, folder) {
   return results;
 }
 
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const idx = cursor;
+      cursor += 1;
+      if (idx >= items.length) break;
+      results[idx] = await worker(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function fetchFolderFilesRecursively(rootFolder, maxDepth = 3, maxSubfoldersPerRoot = 30) {
   const rootTitle = String(rootFolder?.title || 'Study Library').trim() || 'Study Library';
   const rootFolderId = String(rootFolder?.folderId || '');
   if (!/^[a-zA-Z0-9_-]{10,128}$/.test(rootFolderId)) return [];
 
-  const visitedFolderIds = new Set();
+  const visitedFolderIds = new Set([rootFolderId]);
   const seenFileIds = new Set();
   const collectedFiles = [];
-  const queue = [{ folderId: rootFolderId, title: rootTitle, pathPrefix: '', depth: 0 }];
-  let subfoldersProcessed = 0;
+  let currentLevel = [{ folderId: rootFolderId, title: rootTitle, pathPrefix: '', depth: 0 }];
+  let foldersProcessed = 0;
 
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!visitedFolderIds.add(current.folderId)) continue;
+  while (currentLevel.length > 0 && foldersProcessed <= maxSubfoldersPerRoot) {
+    const budget = Math.max(1, maxSubfoldersPerRoot + 1 - foldersProcessed);
+    const batch = currentLevel.slice(0, budget);
+    foldersProcessed += batch.length;
 
-    let html;
-    try {
-      html = await fetchHttpsText(`https://drive.google.com/embeddedfolderview?id=${current.folderId}#list`);
-    } catch (err) {
-      if (current.depth === 0) throw err;
-      continue;
-    }
-
-    const entries = parseEmbeddedFolderHtml(html, {
-      folderId: current.folderId,
-      title: current.title
+    const batchResults = await runWithConcurrency(batch, DRIVE_SYNC_CONCURRENCY, async (node) => {
+      try {
+        const html = await fetchHttpsText(`https://drive.google.com/embeddedfolderview?id=${node.folderId}#list`);
+        return { node, html, error: null };
+      } catch (err) {
+        return { node, html: '', error: err };
+      }
     });
 
-    for (const entry of entries) {
-      if (entry.isSubFolder) {
-        if (
-          current.depth < maxDepth &&
-          subfoldersProcessed < maxSubfoldersPerRoot &&
-          /^[a-zA-Z0-9_-]{10,128}$/.test(entry.fileId) &&
-          !visitedFolderIds.has(entry.fileId)
-        ) {
-          subfoldersProcessed += 1;
-          const nextPath = current.pathPrefix ? `${current.pathPrefix} / ${entry.name}` : entry.name;
-          queue.push({
-            folderId: entry.fileId,
-            title: entry.name,
-            pathPrefix: nextPath,
-            depth: current.depth + 1
-          });
-        }
-      } else {
-        const dedupeKey = `${rootFolderId}::${entry.fileId}`;
-        if (!seenFileIds.has(dedupeKey)) {
-          seenFileIds.add(dedupeKey);
-          collectedFiles.push({
-            ...entry,
-            folderId: rootFolderId,
-            rootFolderTitle: rootTitle,
-            subFolderPath: current.pathPrefix,
-            folderTitle: current.pathPrefix || rootTitle,
-            isSubFolder: false
-          });
+    const nextLevel = [];
+    for (const { node, html, error } of batchResults) {
+      if (error && node.depth === 0) throw error;
+      if (!html) continue;
+
+      const entries = parseEmbeddedFolderHtml(html, {
+        folderId: node.folderId,
+        title: node.title
+      });
+
+      for (const entry of entries) {
+        if (entry.isSubFolder) {
+          if (
+            node.depth < maxDepth &&
+            visitedFolderIds.size <= maxSubfoldersPerRoot &&
+            /^[a-zA-Z0-9_-]{10,128}$/.test(entry.fileId) &&
+            !visitedFolderIds.has(entry.fileId)
+          ) {
+            visitedFolderIds.add(entry.fileId);
+            const nextPath = node.pathPrefix ? `${node.pathPrefix} / ${entry.name}` : entry.name;
+            nextLevel.push({
+              folderId: entry.fileId,
+              title: entry.name,
+              pathPrefix: nextPath,
+              depth: node.depth + 1
+            });
+          }
+        } else {
+          const dedupeKey = `${rootFolderId}::${entry.fileId}`;
+          if (!seenFileIds.has(dedupeKey)) {
+            seenFileIds.add(dedupeKey);
+            collectedFiles.push({
+              ...entry,
+              folderId: rootFolderId,
+              rootFolderTitle: rootTitle,
+              subFolderPath: node.pathPrefix,
+              folderTitle: node.pathPrefix || rootTitle,
+              isSubFolder: false
+            });
+          }
         }
       }
     }
+    currentLevel = nextLevel;
   }
 
   return collectedFiles;
@@ -579,27 +609,118 @@ function registerIpcHandlers() {
     return { ok: true };
   });
 
+  const getDownloadedIds = () => {
+    try {
+      const cacheRoot = getCacheDir();
+      const entries = fs.readdirSync(cacheRoot, { withFileTypes: true });
+      const ids = [];
+      for (const ent of entries) {
+        if (!ent.isDirectory() || !ent.name.startsWith('gdrive_')) continue;
+        const dirPath = path.join(cacheRoot, ent.name);
+        const hasValid = fs.readdirSync(dirPath).some((name) => {
+          if (name.endsWith('.tmp') || /^Drive (Item|File)/i.test(name)) return false;
+          try {
+            const st = fs.statSync(path.join(dirPath, name));
+            return st.isFile() && st.size > 0;
+          } catch {
+            return false;
+          }
+        });
+        if (hasValid) ids.push(ent.name.slice('gdrive_'.length));
+      }
+      return ids;
+    } catch {
+      return [];
+    }
+  };
+
+  const loadDriveIndex = () => {
+    try {
+      const indexPath = path.join(getCacheDir(), DRIVE_INDEX_FILE);
+      if (!fs.existsSync(indexPath)) return [];
+      const parsed = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const saveDriveIndex = (files) => {
+    try {
+      const cacheDir = getCacheDir();
+      const indexPath = path.join(cacheDir, DRIVE_INDEX_FILE);
+      const tmpPath = `${indexPath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(files || []), 'utf8');
+      if (fs.existsSync(indexPath)) fs.unlinkSync(indexPath);
+      fs.renameSync(tmpPath, indexPath);
+    } catch {
+      // non-fatal
+    }
+  };
+
+  ipcMain.handle('drive:get-cached-state', () => ({
+    files: loadDriveIndex(),
+    downloadedIds: getDownloadedIds()
+  }));
+
+  ipcMain.handle('drive:delete-offline', (_event, rawFileId) => {
+    const fileId = String(rawFileId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128);
+    if (!fileId) return { ok: false };
+    const cacheRoot = getCacheDir();
+    const itemCacheDir = path.resolve(cacheRoot, `gdrive_${fileId}`);
+    if (!itemCacheDir.startsWith(cacheRoot + path.sep)) return { ok: false };
+    try {
+      fs.rmSync(itemCacheDir, { recursive: true, force: true });
+      return { ok: true, downloadedIds: getDownloadedIds() };
+    } catch {
+      return { ok: false };
+    }
+  });
+
   ipcMain.handle('drive:sync-folders', async (_event, folders) => {
-    if (!Array.isArray(folders)) return { files: [] };
-    const collected = [];
-    let lastError = null;
-    for (const folder of folders.slice(0, 20)) {
-      const folderId = String(folder?.folderId || '');
-      if (!/^[a-zA-Z0-9_-]{10,128}$/.test(folderId)) continue;
+    if (!Array.isArray(folders)) return { files: [], downloadedIds: getDownloadedIds() };
+    const validFolders = folders
+      .slice(0, 20)
+      .filter((f) => /^[a-zA-Z0-9_-]{10,128}$/.test(String(f?.folderId || '')));
+    if (validFolders.length === 0) {
+      saveDriveIndex([]);
+      return { files: [], downloadedIds: getDownloadedIds() };
+    }
+
+    const perFolder = await runWithConcurrency(validFolders, DRIVE_SYNC_CONCURRENCY, async (folder) => {
       try {
-        const nestedFiles = await fetchFolderFilesRecursively({
-          folderId,
+        const files = await fetchFolderFilesRecursively({
+          folderId: String(folder.folderId),
           title: String(folder?.title || '')
         });
-        collected.push(...nestedFiles);
+        return { ok: true, files };
       } catch (err) {
-        lastError = err;
+        return { ok: false, error: err };
+      }
+    });
+
+    const collected = [];
+    const seen = new Set();
+    let lastError = null;
+    for (const res of perFolder) {
+      if (res.ok) {
+        for (const f of res.files) {
+          if (!seen.has(f.fileId)) {
+            seen.add(f.fileId);
+            collected.push(f);
+          }
+        }
+      } else {
+        lastError = res.error;
       }
     }
+
     if (collected.length === 0 && lastError) {
-      return { files: [], error: lastError.message };
+      const cachedFiles = loadDriveIndex();
+      return { files: cachedFiles, downloadedIds: getDownloadedIds(), error: lastError.message, fromCache: true };
     }
-    return { files: collected };
+    saveDriveIndex(collected);
+    return { files: collected, downloadedIds: getDownloadedIds() };
   });
 
   ipcMain.handle('drive:download-open', async (_event, item) => {

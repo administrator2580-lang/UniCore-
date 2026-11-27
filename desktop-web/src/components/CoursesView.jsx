@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  CheckCircle2,
   Cloud,
   Download,
   ExternalLink,
@@ -43,7 +44,14 @@ export default function CoursesView({
   driveFolders,
   driveFiles,
   isDriveRefreshing,
+  downloadedDriveIds = new Set(),
+  downloadingOfflineIds = new Set(),
+  isBatchDownloadingOffline = false,
   onRefreshDrive,
+  onSaveDriveOffline,
+  onRemoveDriveOffline,
+  onDownloadAllOffline,
+  onMarkDriveDownloaded,
   onShowToast
 }) {
   const canManage = userRole !== 'STUDENT';
@@ -53,6 +61,7 @@ export default function CoursesView({
   const [selectedDepartmentId, setSelectedDepartmentId] = useState(null);
   const [selectedYear, setSelectedYear] = useState(null);
   const [selectedLibrarySection, setSelectedLibrarySection] = useState(null);
+  const [offlineOnly, setOfflineOnly] = useState(false);
   const [openingCourseId, setOpeningCourseId] = useState(null);
   const [openingDriveId, setOpeningDriveId] = useState(null);
   const [inAppPreview, setInAppPreview] = useState(null); // { title, url, mimeType, isIframe, revokeUrl }
@@ -111,20 +120,31 @@ export default function CoursesView({
     }
   }, [librarySections, selectedLibrarySection]);
 
+  const offlineLibraryCount = useMemo(
+    () => scopedDriveFiles.filter((f) => downloadedDriveIds?.has?.(f.fileId)).length,
+    [scopedDriveFiles, downloadedDriveIds]
+  );
+
   const filteredDriveFiles = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return scopedDriveFiles.filter((f) => {
       const sectionLabel = (f.subFolderPath || f.rootFolderTitle || f.folderTitle || '').trim();
       const matchesSection = !selectedLibrarySection || sectionLabel === selectedLibrarySection;
+      const matchesOffline = !offlineOnly || downloadedDriveIds?.has?.(f.fileId);
       const matchesQuery =
         !q ||
         (f.name || '').toLowerCase().includes(q) ||
         (f.subFolderPath || '').toLowerCase().includes(q) ||
         (f.rootFolderTitle || '').toLowerCase().includes(q) ||
         (f.folderTitle || '').toLowerCase().includes(q);
-      return matchesSection && matchesQuery;
+      return matchesSection && matchesOffline && matchesQuery;
     });
-  }, [scopedDriveFiles, selectedLibrarySection, searchQuery]);
+  }, [scopedDriveFiles, selectedLibrarySection, offlineOnly, downloadedDriveIds, searchQuery]);
+
+  const pendingOfflineFiles = useMemo(
+    () => filteredDriveFiles.filter((f) => !downloadedDriveIds?.has?.(f.fileId)),
+    [filteredDriveFiles, downloadedDriveIds]
+  );
 
   const filteredCourses = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -196,8 +216,12 @@ export default function CoursesView({
       if (window.unicoreDesktop?.downloadAndOpenDriveFile) {
         const res = await window.unicoreDesktop.downloadAndOpenDriveFile({
           ...item,
-          openExternally: !previewInsideApp
+          openExternally: !previewInsideApp,
+          skipDownloadsCopy: previewInsideApp
         });
+        if (res?.localPath || res?.base64 || res?.textContent) {
+          onMarkDriveDownloaded?.(item.fileId);
+        }
         if (res?.downloadsPath) {
           onShowToast(`${strings.downloadedSavedToast} ${res.fileName || item.name}`);
         }
@@ -412,7 +436,7 @@ export default function CoursesView({
       </div>
 
       {/* Study Files Library Card (Drive acts purely as hidden backend storage; only Super Admin manages links) */}
-      {(isSuperAdmin || isDriveRefreshing || filteredDriveFiles.length > 0) ? (
+      {(isSuperAdmin || isDriveRefreshing || scopedDriveFiles.length > 0) ? (
         <div className="m3-card accent-secondary">
           <div className="row-between" style={{ flexWrap: 'wrap' }}>
             <div className="row-gap">
@@ -425,6 +449,23 @@ export default function CoursesView({
               </div>
             </div>
             <div className="row-gap">
+              {window.unicoreDesktop?.downloadAndOpenDriveFile && pendingOfflineFiles.length > 0 ? (
+                <button
+                  type="button"
+                  className="btn btn-tonal"
+                  disabled={isBatchDownloadingOffline}
+                  onClick={() => onDownloadAllOffline?.(filteredDriveFiles)}
+                >
+                  {isBatchDownloadingOffline ? (
+                    <span className="spinner" />
+                  ) : (
+                    <>
+                      <Download size={15} />
+                      <span>{`${strings.saveAllOfflineAction} (${pendingOfflineFiles.length})`}</span>
+                    </>
+                  )}
+                </button>
+              ) : null}
               {visibleDriveFolders.length > 0 && window.unicoreDesktop?.syncDriveFolders ? (
                 <button
                   type="button"
@@ -449,38 +490,55 @@ export default function CoursesView({
             </div>
           </div>
 
-          {librarySections.length > 1 ? (
+          {scopedDriveFiles.length > 0 ? (
             <div className="chip-scroll">
               <button
                 type="button"
-                className={`m3-chip ${selectedLibrarySection === null ? 'selected' : ''}`}
-                onClick={() => setSelectedLibrarySection(null)}
+                className={`m3-chip ${selectedLibrarySection === null && !offlineOnly ? 'selected' : ''}`}
+                onClick={() => {
+                  setSelectedLibrarySection(null);
+                  setOfflineOnly(false);
+                }}
               >
                 {strings.allSections}
               </button>
-              {librarySections.map((section) => (
+              {window.unicoreDesktop?.downloadAndOpenDriveFile ? (
                 <button
-                  key={section}
                   type="button"
-                  className={`m3-chip ${selectedLibrarySection === section ? 'selected' : ''}`}
-                  onClick={() =>
-                    setSelectedLibrarySection(selectedLibrarySection === section ? null : section)
-                  }
+                  className={`m3-chip ${offlineOnly ? 'selected' : ''}`}
+                  onClick={() => setOfflineOnly(!offlineOnly)}
                 >
-                  {section}
+                  <CheckCircle2 size={14} />
+                  <span>{`${strings.offlineOnlyFilter} (${offlineLibraryCount})`}</span>
                 </button>
-              ))}
+              ) : null}
+              {librarySections.length > 1
+                ? librarySections.map((section) => (
+                    <button
+                      key={section}
+                      type="button"
+                      className={`m3-chip ${selectedLibrarySection === section ? 'selected' : ''}`}
+                      onClick={() =>
+                        setSelectedLibrarySection(selectedLibrarySection === section ? null : section)
+                      }
+                    >
+                      {section}
+                    </button>
+                  ))
+                : null}
             </div>
           ) : null}
 
           {filteredDriveFiles.length === 0 && !isDriveRefreshing ? (
-            isSuperAdmin ? <div className="muted">{strings.noDriveFilesYet}</div> : null
+            <div className="muted">{strings.noDriveFilesYet}</div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               {filteredDriveFiles.map((item) => {
                 const subtitle = [item.subFolderPath, item.rootFolderTitle]
                   .filter(Boolean)
                   .join(' • ') || item.folderTitle;
+                const isOffline = downloadedDriveIds?.has?.(item.fileId);
+                const isSavingOffline = downloadingOfflineIds?.has?.(item.fileId);
                 return (
                   <div
                     key={item.fileId}
@@ -507,14 +565,51 @@ export default function CoursesView({
                         >
                           {item.name}
                         </div>
-                        {subtitle ? (
-                          <div className="muted" style={{ fontSize: '0.78rem' }}>
-                            {subtitle}
-                          </div>
-                        ) : null}
+                        <div className="row-gap" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                          {subtitle ? (
+                            <span className="muted" style={{ fontSize: '0.78rem' }}>
+                              {subtitle}
+                            </span>
+                          ) : null}
+                          {isOffline ? (
+                            <span className="pill pill-secondary" style={{ fontSize: '0.72rem', padding: '2px 8px' }}>
+                              <CheckCircle2 size={12} />
+                              <span>{strings.offlineReadyBadge}</span>
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                     <div className="row-gap">
+                      {window.unicoreDesktop?.downloadAndOpenDriveFile ? (
+                        isOffline ? (
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            title={strings.removeOfflineAction}
+                            onClick={() => onRemoveDriveOffline?.(item)}
+                            style={{ color: 'var(--text-secondary)' }}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-outlined"
+                            disabled={isSavingOffline || openingDriveId === item.fileId}
+                            onClick={() => onSaveDriveOffline?.(item)}
+                          >
+                            {isSavingOffline ? (
+                              <span className="spinner" />
+                            ) : (
+                              <>
+                                <Download size={15} />
+                                <span>{strings.saveOfflineAction}</span>
+                              </>
+                            )}
+                          </button>
+                        )
+                      ) : null}
                       <button
                         type="button"
                         className="btn btn-tonal"
@@ -522,7 +617,7 @@ export default function CoursesView({
                         onClick={() => handleOpenDriveFile(item, true)}
                       >
                         <Eye size={15} />
-                        <span>{strings.previewInAppAction}</span>
+                        <span>{isOffline ? strings.openOfflineAction : strings.previewInAppAction}</span>
                       </button>
                       <button
                         type="button"

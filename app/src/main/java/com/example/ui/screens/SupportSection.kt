@@ -39,6 +39,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,6 +56,8 @@ import com.example.data.model.SupportMessage
 import com.example.data.model.UserRole
 import com.example.ui.i18n.LocalAppStrings
 import com.example.ui.viewmodel.UiState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SupportMessagingCard(
@@ -244,11 +247,19 @@ private fun SupportMessageItem(
     val isReplied = message.status == "REPLIED" && !message.replyText.isNullOrBlank()
     var zoomedBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
-    val questionBitmap = remember(message.id, message.attachmentBase64) {
-        decodeSupportBase64Bitmap(message.attachmentBase64)
+    val questionBitmap by produceState<Bitmap?>(
+        initialValue = null,
+        key1 = message.id,
+        key2 = message.attachmentBase64
+    ) {
+        value = withContext(Dispatchers.IO) { decodeSupportBase64Bitmap(message.attachmentBase64) }
     }
-    val replyBitmap = remember(message.id, message.replyAttachmentBase64) {
-        decodeSupportBase64Bitmap(message.replyAttachmentBase64)
+    val replyBitmap by produceState<Bitmap?>(
+        initialValue = null,
+        key1 = message.id,
+        key2 = message.replyAttachmentBase64
+    ) {
+        value = withContext(Dispatchers.IO) { decodeSupportBase64Bitmap(message.replyAttachmentBase64) }
     }
 
     Surface(
@@ -295,16 +306,16 @@ private fun SupportMessageItem(
                 text = message.body,
                 style = MaterialTheme.typography.bodyMedium
             )
-            if (questionBitmap != null) {
+            questionBitmap?.let { decodedQuestionBmp ->
                 Image(
-                    bitmap = questionBitmap.asImageBitmap(),
+                    bitmap = decodedQuestionBmp.asImageBitmap(),
                     contentDescription = message.attachmentName ?: "Support attachment",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = 180.dp)
                         .clip(MaterialTheme.shapes.small)
-                        .clickable { zoomedBitmap = questionBitmap }
+                        .clickable { zoomedBitmap = decodedQuestionBmp }
                 )
             }
 
@@ -328,16 +339,16 @@ private fun SupportMessageItem(
                             text = message.replyText.orEmpty(),
                             style = MaterialTheme.typography.bodySmall
                         )
-                        if (replyBitmap != null) {
+                        replyBitmap?.let { decodedReplyBmp ->
                             Image(
-                                bitmap = replyBitmap.asImageBitmap(),
+                                bitmap = decodedReplyBmp.asImageBitmap(),
                                 contentDescription = message.replyAttachmentName ?: "Reply attachment",
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .heightIn(max = 180.dp)
                                     .clip(MaterialTheme.shapes.small)
-                                    .clickable { zoomedBitmap = replyBitmap }
+                                    .clickable { zoomedBitmap = decodedReplyBmp }
                             )
                         }
                     }

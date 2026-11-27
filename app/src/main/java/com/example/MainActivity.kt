@@ -249,6 +249,7 @@ private fun UniCoreAuthenticatedShell(
                 val databaseId = app.getString(R.string.firestore_database_id)
                 val db = FirebaseFirestore.getInstance(databaseId)
                 UniCoreViewModel(
+                    appContext = app.applicationContext,
                     repository = UniCoreRepository(db),
                     governance = UniCoreGovernanceRepository(db),
                     aiRepository = AiTutorRepository(),
@@ -276,6 +277,9 @@ private fun UniCoreAuthenticatedShell(
     val driveFoldersState by viewModel.driveFoldersState.collectAsStateWithLifecycle()
     val driveFilesState by viewModel.driveFilesState.collectAsStateWithLifecycle()
     val isDriveRefreshing by viewModel.isDriveRefreshing.collectAsStateWithLifecycle()
+    val downloadedDriveFileIds by viewModel.downloadedDriveFileIds.collectAsStateWithLifecycle()
+    val downloadingOfflineIds by viewModel.downloadingOfflineIds.collectAsStateWithLifecycle()
+    val isBatchDownloadingOffline by viewModel.isBatchDownloadingOffline.collectAsStateWithLifecycle()
     val openingCourseId by viewModel.openingCourseId.collectAsStateWithLifecycle()
     val openingDriveFileId by viewModel.openingDriveFileId.collectAsStateWithLifecycle()
     val quizzesState by viewModel.quizzesState.collectAsStateWithLifecycle()
@@ -510,6 +514,9 @@ private fun UniCoreAuthenticatedShell(
                                 driveFoldersState = driveFoldersState,
                                 driveFilesState = driveFilesState,
                                 isDriveRefreshing = isDriveRefreshing,
+                                downloadedDriveFileIds = downloadedDriveFileIds,
+                                downloadingOfflineIds = downloadingOfflineIds,
+                                isBatchDownloadingOffline = isBatchDownloadingOffline,
                                 openingCourseId = openingCourseId,
                                 openingDriveFileId = openingDriveFileId,
                                 userRole = userRole,
@@ -531,6 +538,15 @@ private fun UniCoreAuthenticatedShell(
                                 onRefreshDrive = viewModel::refreshDriveFilesNow,
                                 onOpenDriveFile = { item ->
                                     viewModel.openDriveSyncedFile(context, item)
+                                },
+                                onSaveDriveFileOffline = { item ->
+                                    viewModel.saveDriveFileOffline(context, item)
+                                },
+                                onRemoveDriveFileOffline = { item ->
+                                    viewModel.removeDriveFileOffline(context, item)
+                                },
+                                onDownloadAllOffline = { items ->
+                                    viewModel.downloadAllDriveFilesOffline(context, items)
                                 }
                             )
                             UniCoreTab.QUIZZES -> QuizzesScreen(

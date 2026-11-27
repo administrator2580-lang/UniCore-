@@ -202,7 +202,13 @@ export const EnglishStrings = {
   aiSourceNone: 'General (No File)',
   aiSourcesPickerTitle: 'Study File Source',
   aiSourcesUsedPrefix: 'Source',
-  aiReadingPrefix: 'Reading uploaded file:'
+  aiReadingPrefix: 'Reading uploaded file:',
+  saveOfflineAction: 'Save Offline',
+  offlineReadyBadge: 'Offline Ready',
+  openOfflineAction: 'Open Offline',
+  removeOfflineAction: 'Remove Offline Copy',
+  saveAllOfflineAction: 'Save All Offline',
+  offlineOnlyFilter: 'Offline Ready'
 };
 
 export const ArabicStrings = {
@@ -409,7 +415,13 @@ export const ArabicStrings = {
   aiSourceNone: 'عام (بدون ملفات)',
   aiSourcesPickerTitle: 'مصدر الشرح من الملفات',
   aiSourcesUsedPrefix: 'المصدر المرفوع',
-  aiReadingPrefix: 'جاري فتح وقراءة الملف:'
+  aiReadingPrefix: 'جاري فتح وقراءة الملف:',
+  saveOfflineAction: 'تنزيل بدون نت',
+  offlineReadyBadge: 'متاح بدون نت',
+  openOfflineAction: 'فتح بدون نت',
+  removeOfflineAction: 'حذف النسخة المحفوظة',
+  saveAllOfflineAction: 'تنزيل الكل بدون نت',
+  offlineOnlyFilter: 'المتاح بدون نت'
 };
 
 export function stringsFor(lang) {

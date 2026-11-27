@@ -200,7 +200,13 @@ data class UniCoreStrings(
     val storageVaultSubtitle: String,
     val addStorageSource: String,
     val editStorageSource: String,
-    val noStorageSourcesYet: String
+    val noStorageSourcesYet: String,
+    val saveOfflineAction: String,
+    val offlineReadyBadge: String,
+    val openOfflineAction: String,
+    val removeOfflineAction: String,
+    val saveAllOfflineAction: String,
+    val offlineOnlyFilter: String
 )
 
 val EnglishStrings = UniCoreStrings(
@@ -398,7 +404,13 @@ val EnglishStrings = UniCoreStrings(
     storageVaultSubtitle = "Manage linked cloud storage folders. Only Super Admin can view, edit, or delete storage links.",
     addStorageSource = "Add Storage Link",
     editStorageSource = "Edit Storage Link",
-    noStorageSourcesYet = "No storage folders connected yet."
+    noStorageSourcesYet = "No storage folders connected yet.",
+    saveOfflineAction = "Save Offline",
+    offlineReadyBadge = "Offline Ready",
+    openOfflineAction = "Open Offline",
+    removeOfflineAction = "Remove Offline Copy",
+    saveAllOfflineAction = "Save All Offline",
+    offlineOnlyFilter = "Offline Ready"
 )
 
 val ArabicStrings = UniCoreStrings(
@@ -596,7 +608,13 @@ val ArabicStrings = UniCoreStrings(
     storageVaultSubtitle = "إدارة روابط التخزين السحابي. السوبر أدمن فقط يمكنه الإضافة أو التعديل أو الحذف.",
     addStorageSource = "إضافة رابط مخزن",
     editStorageSource = "تعديل رابط المخزن",
-    noStorageSourcesYet = "لا توجد مجلدات تخزين مربوطة حالياً."
+    noStorageSourcesYet = "لا توجد مجلدات تخزين مربوطة حالياً.",
+    saveOfflineAction = "تنزيل بدون نت",
+    offlineReadyBadge = "متاح بدون نت",
+    openOfflineAction = "فتح بدون نت",
+    removeOfflineAction = "حذف النسخة المحفوظة",
+    saveAllOfflineAction = "تنزيل الكل بدون نت",
+    offlineOnlyFilter = "المتاح بدون نت"
 )
 
 fun stringsFor(language: AppLanguage): UniCoreStrings = when (language) {

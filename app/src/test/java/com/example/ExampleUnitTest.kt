@@ -206,5 +206,60 @@ class ExampleUnitTest {
     assertTrue(candidates.first().contextSubtitle.contains("CAD"))
     assertTrue(candidates.first().contextSubtitle.contains("NCT 1"))
   }
+
+  @Test
+  fun driveOfflineIndex_persistsAndRestoresMetadataInCacheDir() {
+    val tempRoot = java.nio.file.Files.createTempDirectory("unicore_idx_test").toFile()
+    try {
+      val repo = GoogleDriveSyncRepository()
+      val sample = listOf(
+        DriveSyncedFile(
+          fileId = "fileAlpha12345",
+          folderId = "folderRoot1",
+          folderTitle = "NCT 1 / CAD",
+          rootFolderTitle = "NCT 1",
+          subFolderPath = "CAD",
+          name = "AutoCAD Lecture 1.pdf",
+          mimeHint = "application/pdf",
+          viewUrl = "https://drive.google.com/file/d/fileAlpha12345/view",
+          downloadUrl = "https://drive.usercontent.google.com/download?id=fileAlpha12345&export=download&confirm=t"
+        )
+      )
+
+      repo.saveSyncedIndexToDir(tempRoot, sample)
+      val loaded = repo.loadSyncedIndexFromDir(tempRoot)
+
+      assertEquals(1, loaded.size)
+      assertEquals("fileAlpha12345", loaded[0].fileId)
+      assertEquals("AutoCAD Lecture 1.pdf", loaded[0].name)
+      assertEquals("NCT 1", loaded[0].rootFolderTitle)
+      assertEquals("CAD", loaded[0].subFolderPath)
+    } finally {
+      tempRoot.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun offlineCacheDetection_ignoresTmpFilesAndDeletesSafely() {
+    val tempRoot = java.nio.file.Files.createTempDirectory("unicore_cache_test").toFile()
+    try {
+      val repo = GoogleDriveSyncRepository()
+      val validDir = java.io.File(tempRoot, "gdrive_validDoc12345").apply { mkdirs() }
+      java.io.File(validDir, "Lecture_Notes.pdf").writeText("PDF-CONTENT")
+
+      val tmpDir = java.io.File(tempRoot, "gdrive_tempDoc67890").apply { mkdirs() }
+      java.io.File(tmpDir, "Partial.pdf.tmp").writeText("PARTIAL")
+
+      val detected = repo.getDownloadedFileIdsFromDir(tempRoot)
+      assertTrue(detected.contains("validDoc12345"))
+      assertFalse(detected.contains("tempDoc67890"))
+
+      val deleted = repo.deleteOfflineFileFromDir(tempRoot, "validDoc12345")
+      assertTrue(deleted)
+      assertFalse(repo.getDownloadedFileIdsFromDir(tempRoot).contains("validDoc12345"))
+    } finally {
+      tempRoot.deleteRecursively()
+    }
+  }
 }
 

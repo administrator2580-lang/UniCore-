@@ -71,6 +71,41 @@ export async function logAuditEvent(db, auth, action, severity, targetPath, deta
   }
 }
 
+const SESSION_CACHE_PREFIX = 'unicore_session_meta_v1_';
+
+export function getCachedUserRole(uid) {
+  if (!uid) return null;
+  try {
+    const raw = localStorage.getItem(`${SESSION_CACHE_PREFIX}${uid}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (['STUDENT', 'ADMIN', 'SUPER_ADMIN'].includes(parsed?.role)) {
+      return parsed.role;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function readSessionMeta(uid) {
+  try {
+    const raw = localStorage.getItem(`${SESSION_CACHE_PREFIX}${uid}`);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSessionMeta(uid, patch) {
+  try {
+    const next = { ...readSessionMeta(uid), ...patch };
+    localStorage.setItem(`${SESSION_CACHE_PREFIX}${uid}`, JSON.stringify(next));
+  } catch {
+    // non-fatal
+  }
+}
+
 export async function ensureUserSessionProfile(db, auth) {
   const user = auth.currentUser;
   if (!user?.uid) throw new Error('Not authenticated');
@@ -79,144 +114,169 @@ export async function ensureUserSessionProfile(db, auth) {
   const normalizedEmail = (user.email || '').trim().toLowerCase();
   const isBootstrappedSuperAdmin =
     normalizedEmail === BOOTSTRAPPED_SUPER_ADMIN_EMAIL && user.emailVerified === true;
+  const sessionMeta = readSessionMeta(uid);
 
-  let pendingInvite = null;
-  if (normalizedEmail && user.emailVerified === true) {
-    try {
-      const invSnap = await getDoc(doc(db, 'role_invites', normalizedEmail));
-      if (invSnap.exists() && invSnap.data()?.status === 'PENDING') {
-        pendingInvite = { id: invSnap.id, ...invSnap.data() };
+  try {
+    const [pendingInvite, hasSuperAdminDoc, hasAdminDoc, userSnap] = await Promise.all([
+      normalizedEmail && user.emailVerified === true
+        ? getDoc(doc(db, 'role_invites', normalizedEmail))
+            .then((invSnap) =>
+              invSnap.exists() && invSnap.data()?.status === 'PENDING'
+                ? { id: invSnap.id, ...invSnap.data() }
+                : null
+            )
+            .catch(() => null)
+        : Promise.resolve(null),
+      isBootstrappedSuperAdmin
+        ? Promise.resolve(true)
+        : getDoc(doc(db, 'super_admins', uid))
+            .then((s) => s.exists())
+            .catch(() => false),
+      getDoc(doc(db, 'admins', uid))
+        .then((s) => s.exists())
+        .catch(() => false),
+      getDoc(doc(db, 'users', uid)).catch(() => null)
+    ]);
+
+    const hasPendingAdminInvite = pendingInvite?.assignedRole === 'ADMIN';
+    const resolvedRole =
+      isBootstrappedSuperAdmin || hasSuperAdminDoc
+        ? 'SUPER_ADMIN'
+        : hasAdminDoc || hasPendingAdminInvite
+          ? 'ADMIN'
+          : 'STUDENT';
+
+    if (isBootstrappedSuperAdmin && !sessionMeta.superBootstrapped) {
+      try {
+        const superRef = doc(db, 'super_admins', uid);
+        const settingsRef = doc(db, 'system_settings', 'global');
+        const [superSnap, settingsSnap] = await Promise.all([getDoc(superRef), getDoc(settingsRef)]);
+        await Promise.all([
+          !superSnap.exists()
+            ? setDoc(superRef, {
+                userId: uid,
+                email: normalizedEmail || BOOTSTRAPPED_SUPER_ADMIN_EMAIL,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp()
+              })
+            : Promise.resolve(),
+          !settingsSnap.exists()
+            ? setDoc(settingsRef, {
+                dailyAiLimitPerUser: 20,
+                dailyWriteLimitPerUser: 100,
+                maxFileUploadBytes: 5_242_880,
+                aiEnabled: true,
+                zeroCostLockActive: false,
+                updatedBy: uid,
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp()
+              })
+            : Promise.resolve()
+        ]);
+        writeSessionMeta(uid, { superBootstrapped: true });
+      } catch {
+        // non-fatal when offline
       }
-    } catch {
-      pendingInvite = null;
     }
-  }
 
-  let hasSuperAdminDoc = false;
-  try {
-    hasSuperAdminDoc = (await getDoc(doc(db, 'super_admins', uid))).exists();
-  } catch {
-    hasSuperAdminDoc = false;
-  }
-
-  let hasAdminDoc = false;
-  try {
-    hasAdminDoc = (await getDoc(doc(db, 'admins', uid))).exists();
-  } catch {
-    hasAdminDoc = false;
-  }
-
-  const hasPendingAdminInvite = pendingInvite?.assignedRole === 'ADMIN';
-  const resolvedRole =
-    isBootstrappedSuperAdmin || hasSuperAdminDoc
-      ? 'SUPER_ADMIN'
-      : hasAdminDoc || hasPendingAdminInvite
-        ? 'ADMIN'
-        : 'STUDENT';
-
-  if (isBootstrappedSuperAdmin) {
-    const superRef = doc(db, 'super_admins', uid);
-    if (!(await getDoc(superRef)).exists()) {
-      await setDoc(superRef, {
+    // Step 1: Pending Admin Invite -> /admins/{uid} before claiming invite
+    if (hasPendingAdminInvite && !hasAdminDoc && pendingInvite && normalizedEmail) {
+      await setDoc(doc(db, 'admins', uid), {
         userId: uid,
-        email: normalizedEmail || BOOTSTRAPPED_SUPER_ADMIN_EMAIL,
+        email: normalizedEmail,
+        grantedBy: pendingInvite.invitedBy,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
     }
-    const settingsRef = doc(db, 'system_settings', 'global');
-    if (!(await getDoc(settingsRef)).exists()) {
-      await setDoc(settingsRef, {
-        dailyAiLimitPerUser: 20,
-        dailyWriteLimitPerUser: 100,
-        maxFileUploadBytes: 5_242_880,
-        aiEnabled: true,
-        zeroCostLockActive: false,
-        updatedBy: uid,
+
+    // Step 2: Create or update /users/{uid}
+    const userRef = doc(db, 'users', uid);
+    let cleanName = sanitizeText(user.displayName || pendingInvite?.displayNameHint || 'UniCore Learner').slice(0, 60);
+    if (cleanName.length < 2) cleanName = 'Learner';
+
+    if (userSnap && !userSnap.exists()) {
+      await setDoc(userRef, {
+        userId: uid,
+        displayName: cleanName,
+        role: resolvedRole,
+        aiCallsToday: 0,
+        writesToday: 0,
+        quotaDayKey: today,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
+    } else if (userSnap && userSnap.exists()) {
+      const data = userSnap.data() || {};
+      const updates = { updatedAt: serverTimestamp() };
+      if (data.quotaDayKey !== today) {
+        updates.aiCallsToday = 0;
+        updates.writesToday = 0;
+        updates.quotaDayKey = today;
+      }
+      if (hasPendingAdminInvite && data.role === 'STUDENT') {
+        updates.role = 'ADMIN';
+      }
+      if (Object.keys(updates).length > 1) {
+        await updateDoc(userRef, updates).catch(() => {});
+      }
     }
-  }
 
-  // Step 1: Pending Admin Invite -> /admins/{uid} before claiming invite
-  if (hasPendingAdminInvite && !hasAdminDoc && pendingInvite && normalizedEmail) {
-    await setDoc(doc(db, 'admins', uid), {
-      userId: uid,
-      email: normalizedEmail,
-      grantedBy: pendingInvite.invitedBy,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
-  }
-
-  // Step 2: Create or update /users/{uid}
-  const userRef = doc(db, 'users', uid);
-  const userSnap = await getDoc(userRef);
-  let cleanName = sanitizeText(user.displayName || pendingInvite?.displayNameHint || 'UniCore Learner').slice(0, 60);
-  if (cleanName.length < 2) cleanName = 'Learner';
-
-  if (!userSnap.exists()) {
-    await setDoc(userRef, {
-      userId: uid,
-      displayName: cleanName,
-      role: resolvedRole,
-      aiCallsToday: 0,
-      writesToday: 0,
-      quotaDayKey: today,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
-  } else {
-    const data = userSnap.data() || {};
-    const updates = { updatedAt: serverTimestamp() };
-    if (data.quotaDayKey !== today) {
-      updates.aiCallsToday = 0;
-      updates.writesToday = 0;
-      updates.quotaDayKey = today;
-    }
-    if (hasPendingAdminInvite && data.role === 'STUDENT') {
-      updates.role = 'ADMIN';
-    }
-    if (Object.keys(updates).length > 1) {
-      await updateDoc(userRef, updates);
-    }
-  }
-
-  // Step 3: Mark invite CLAIMED
-  if (pendingInvite && normalizedEmail) {
-    try {
-      await updateDoc(doc(db, 'role_invites', normalizedEmail), {
+    // Step 3: Mark invite CLAIMED
+    if (pendingInvite && normalizedEmail) {
+      updateDoc(doc(db, 'role_invites', normalizedEmail), {
         status: 'CLAIMED',
         claimedByUid: uid,
         updatedAt: serverTimestamp()
-      });
-    } catch {
-      // Ignore if already claimed
+      }).catch(() => {});
     }
+
+    // Step 4: Isolated PII in /users/{uid}/private/pii (skip lookup if already cached)
+    if (!sessionMeta.piiSaved) {
+      try {
+        const piiRef = doc(db, 'users', uid, 'private', 'pii');
+        if (!(await getDoc(piiRef)).exists()) {
+          await setDoc(piiRef, {
+            userId: uid,
+            email: (normalizedEmail || 'unknown@unicore.edu').slice(0, 120),
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp()
+          });
+        }
+        writeSessionMeta(uid, { piiSaved: true });
+      } catch {
+        // ignore offline error
+      }
+    }
+
+    const effectiveRole =
+      resolvedRole !== 'STUDENT'
+        ? resolvedRole
+        : userSnap?.exists?.() && ['ADMIN', 'SUPER_ADMIN', 'STUDENT'].includes(userSnap.data()?.role)
+          ? userSnap.data().role
+          : resolvedRole;
+
+    writeSessionMeta(uid, { role: effectiveRole });
+
+    if (sessionMeta.lastAuditDay !== today) {
+      logAuditEvent(
+        db,
+        auth,
+        'AUTH_SUCCESS',
+        'INFO',
+        `users/${uid}`,
+        `Desktop/Web session initialized with role ${effectiveRole}.`
+      )
+        .then(() => writeSessionMeta(uid, { lastAuditDay: today }))
+        .catch(() => {});
+    }
+
+    return effectiveRole;
+  } catch (err) {
+    const cachedRole = getCachedUserRole(uid);
+    if (cachedRole) return cachedRole;
+    throw err;
   }
-
-  // Step 4: Isolated PII in /users/{uid}/private/pii
-  const piiRef = doc(db, 'users', uid, 'private', 'pii');
-  if (!(await getDoc(piiRef)).exists()) {
-    await setDoc(piiRef, {
-      userId: uid,
-      email: (normalizedEmail || 'unknown@unicore.edu').slice(0, 120),
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
-  }
-
-  await logAuditEvent(
-    db,
-    auth,
-    'AUTH_SUCCESS',
-    'INFO',
-    `users/${uid}`,
-    `Desktop/Web session initialized with role ${resolvedRole}.`
-  );
-
-  return resolvedRole;
 }
 
 export async function incrementDailyCounter(db, uid, isAi) {

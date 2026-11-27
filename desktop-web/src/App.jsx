@@ -18,6 +18,7 @@ import {
 import { getFirebaseClients, signOutUnified } from './firebase/config';
 import {
   ensureUserSessionProfile,
+  getCachedUserRole,
   subscribeAuditLogs,
   subscribeCourses,
   subscribeDepartments,
@@ -187,7 +188,7 @@ function AuthenticatedShell({
   const [tab, setTab] = useState('COURSES');
   const [showNotifications, setShowNotifications] = useState(false);
 
-  const [userRole, setUserRole] = useState('STUDENT');
+  const [userRole, setUserRole] = useState(() => getCachedUserRole(uid) || 'STUDENT');
   const [userProfile, setUserProfile] = useState(null);
   const [systemSettings, setSystemSettings] = useState({
     dailyAiLimitPerUser: 20,
@@ -198,8 +199,20 @@ function AuthenticatedShell({
   const [courses, setCourses] = useState([]);
   const [departments, setDepartments] = useState([]);
   const [driveFolders, setDriveFolders] = useState([]);
-  const [driveFiles, setDriveFiles] = useState([]);
+  const [driveFoldersLoaded, setDriveFoldersLoaded] = useState(false);
+  const [driveFiles, setDriveFiles] = useState(() => {
+    try {
+      const raw = localStorage.getItem('unicore_drive_index_v1');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
   const [isDriveRefreshing, setIsDriveRefreshing] = useState(false);
+  const [downloadedDriveIds, setDownloadedDriveIds] = useState(() => new Set());
+  const [downloadingOfflineIds, setDownloadingOfflineIds] = useState(() => new Set());
+  const [isBatchDownloadingOffline, setIsBatchDownloadingOffline] = useState(false);
   const [quizzes, setQuizzes] = useState([]);
   const [attempts, setAttempts] = useState([]);
   const [files, setFiles] = useState([]);
@@ -210,6 +223,24 @@ function AuthenticatedShell({
   const [auditLogs, setAuditLogs] = useState([]);
 
   const seenNotifsRef = useRef({ initialized: false, ids: new Set() });
+
+  useEffect(() => {
+    let active = true;
+    window.unicoreDesktop?.getCachedDriveState?.()
+      .then((cached) => {
+        if (!active || !cached) return;
+        if (Array.isArray(cached.files) && cached.files.length > 0) {
+          setDriveFiles((prev) => (prev.length > 0 ? prev : cached.files));
+        }
+        if (Array.isArray(cached.downloadedIds)) {
+          setDownloadedDriveIds(new Set(cached.downloadedIds));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [uid]);
 
   useEffect(() => {
     let active = true;
@@ -259,7 +290,14 @@ function AuthenticatedShell({
     const unsubs = [
       subscribeCourses(db, isAdmin, setCourses, (e) => onShowToast(e.message)),
       subscribeDepartments(db, setDepartments, (e) => onShowToast(e.message)),
-      subscribeDriveFolders(db, setDriveFolders, (e) => onShowToast(e.message)),
+      subscribeDriveFolders(
+        db,
+        (folders) => {
+          setDriveFolders(folders);
+          setDriveFoldersLoaded(true);
+        },
+        (e) => onShowToast(e.message)
+      ),
       subscribeQuizzes(db, isAdmin, setQuizzes, (e) => onShowToast(e.message)),
       subscribeQuizAttempts(db, uid, isAdmin, setAttempts, (e) => onShowToast(e.message)),
       subscribeVerifiedFiles(db, uid, setFiles, (e) => onShowToast(e.message)),
@@ -285,25 +323,131 @@ function AuthenticatedShell({
     if (!window.unicoreDesktop?.syncDriveFolders) return;
     if (!foldersToSync.length) {
       setDriveFiles([]);
+      try { localStorage.removeItem('unicore_drive_index_v1'); } catch {}
       return;
     }
     setIsDriveRefreshing(true);
     try {
       const res = await window.unicoreDesktop.syncDriveFolders(foldersToSync);
-      if (res?.error && (!res.files || res.files.length === 0)) {
+      if (Array.isArray(res?.downloadedIds)) {
+        setDownloadedDriveIds(new Set(res.downloadedIds));
+      }
+      if (res?.files?.length > 0) {
+        setDriveFiles(res.files);
+        try { localStorage.setItem('unicore_drive_index_v1', JSON.stringify(res.files)); } catch {}
+      } else if (!res?.error) {
+        setDriveFiles([]);
+        try { localStorage.setItem('unicore_drive_index_v1', '[]'); } catch {}
+      } else if (driveFiles.length === 0) {
         onShowToast(res.error);
       }
-      setDriveFiles(res?.files || []);
     } catch (err) {
-      onShowToast(err.message);
+      if (driveFiles.length === 0) onShowToast(err.message);
     } finally {
       setIsDriveRefreshing(false);
     }
   };
 
   useEffect(() => {
+    if (!driveFoldersLoaded) return;
     refreshDriveNow(driveFolders);
-  }, [driveFolders]);
+  }, [driveFolders, driveFoldersLoaded]);
+
+  const markDriveDownloaded = (fileId) => {
+    if (!fileId) return;
+    setDownloadedDriveIds((prev) => {
+      if (prev.has(fileId)) return prev;
+      const next = new Set(prev);
+      next.add(fileId);
+      return next;
+    });
+  };
+
+  const handleSaveDriveOffline = async (item) => {
+    if (!window.unicoreDesktop?.downloadAndOpenDriveFile || !item?.fileId) return;
+    setDownloadingOfflineIds((prev) => new Set(prev).add(item.fileId));
+    try {
+      const res = await window.unicoreDesktop.downloadAndOpenDriveFile({
+        ...item,
+        openExternally: false,
+        skipDownloadsCopy: true
+      });
+      if (res?.localPath || res?.base64 || res?.textContent) {
+        markDriveDownloaded(item.fileId);
+        onShowToast(`${strings.offlineReadyBadge}: ${res.fileName || item.name}`);
+      } else {
+        onShowToast(item.name);
+      }
+    } catch (err) {
+      onShowToast(err.message || 'Could not save offline');
+    } finally {
+      setDownloadingOfflineIds((prev) => {
+        const next = new Set(prev);
+        next.delete(item.fileId);
+        return next;
+      });
+    }
+  };
+
+  const handleRemoveDriveOffline = async (item) => {
+    if (!window.unicoreDesktop?.deleteOfflineDriveFile || !item?.fileId) return;
+    const res = await window.unicoreDesktop.deleteOfflineDriveFile(item.fileId);
+    if (res?.ok) {
+      if (Array.isArray(res.downloadedIds)) {
+        setDownloadedDriveIds(new Set(res.downloadedIds));
+      } else {
+        setDownloadedDriveIds((prev) => {
+          const next = new Set(prev);
+          next.delete(item.fileId);
+          return next;
+        });
+      }
+      onShowToast(`${strings.removeOfflineAction}: ${item.name}`);
+    }
+  };
+
+  const handleDownloadAllOffline = async (items) => {
+    if (!window.unicoreDesktop?.downloadAndOpenDriveFile) return;
+    const pending = (items || []).filter((f) => !f.isSubFolder && !downloadedDriveIds.has(f.fileId));
+    if (!pending.length) return;
+    setIsBatchDownloadingOffline(true);
+    let savedCount = 0;
+    try {
+      const queue = [...pending];
+      const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+        while (queue.length > 0) {
+          const item = queue.shift();
+          if (!item) break;
+          setDownloadingOfflineIds((prev) => new Set(prev).add(item.fileId));
+          try {
+            const res = await window.unicoreDesktop.downloadAndOpenDriveFile({
+              ...item,
+              openExternally: false,
+              skipDownloadsCopy: true
+            });
+            if (res?.localPath || res?.base64 || res?.textContent) {
+              markDriveDownloaded(item.fileId);
+              savedCount += 1;
+            }
+          } catch {
+            // continue remaining files
+          } finally {
+            setDownloadingOfflineIds((prev) => {
+              const next = new Set(prev);
+              next.delete(item.fileId);
+              return next;
+            });
+          }
+        }
+      });
+      await Promise.all(workers);
+      if (savedCount > 0) {
+        onShowToast(`${strings.offlineReadyBadge} (${savedCount})`);
+      }
+    } finally {
+      setIsBatchDownloadingOffline(false);
+    }
+  };
 
   // Desktop Notification toast on newly arriving notifications
   useEffect(() => {
@@ -458,7 +602,14 @@ function AuthenticatedShell({
                 driveFolders={driveFolders}
                 driveFiles={driveFiles}
                 isDriveRefreshing={isDriveRefreshing}
+                downloadedDriveIds={downloadedDriveIds}
+                downloadingOfflineIds={downloadingOfflineIds}
+                isBatchDownloadingOffline={isBatchDownloadingOffline}
                 onRefreshDrive={() => refreshDriveNow(driveFolders)}
+                onSaveDriveOffline={handleSaveDriveOffline}
+                onRemoveDriveOffline={handleRemoveDriveOffline}
+                onDownloadAllOffline={handleDownloadAllOffline}
+                onMarkDriveDownloaded={markDriveDownloaded}
                 onShowToast={onShowToast}
               />
             ) : null}

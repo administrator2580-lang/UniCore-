@@ -11,31 +11,42 @@ import com.example.data.model.DriveFolderLink
 import com.example.data.model.DriveSyncedFile
 import com.example.security.InputValidator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URLEncoder
+import java.util.Collections
 import java.util.concurrent.TimeUnit
 
 /**
  * Zero-cost Google Drive shared folder sync & direct in-app file downloader.
+ * - Parallel BFS folder crawling + persistent local index cache for instant/offline startup.
  * - Uses drive.usercontent.google.com/download + HTML confirmation form extraction so files
  *   download locally instead of bouncing straight to browser links.
- * - Saves downloaded files with their real names into Downloads/UniCore (via MediaStore on API 29+)
- *   as well as app-private cache for instant in-app preview.
+ * - Stores offline copies in app-private cache (for offline in-app viewing) and optionally exports
+ *   copies into Downloads/UniCore (via MediaStore on API 29+).
  */
 class GoogleDriveSyncRepository(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(14, TimeUnit.SECONDS)
-        .readTimeout(28, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .connectionPool(ConnectionPool(8, 2, TimeUnit.MINUTES))
         .followRedirects(true)
         .build()
 ) {
     companion object {
         private const val MAX_DRIVE_DOWNLOAD_BYTES = 25L * 1024L * 1024L // 25 MB safety cap
+        private const val DRIVE_SYNC_CONCURRENCY = 6
+        private const val INDEX_FILE_NAME = "drive_index.json"
         private val BLOCKED_FILE_EXTENSIONS = setOf(
             "exe", "apk", "dex", "jar", "so", "sh", "bat", "cmd", "js", "vbs", "ps1", "msi", "elf"
         )
@@ -46,31 +57,43 @@ class GoogleDriveSyncRepository(
     suspend fun syncDriveFolders(folders: List<DriveFolderLink>): Result<List<DriveSyncedFile>> =
         withContext(Dispatchers.IO) {
             if (folders.isEmpty()) return@withContext Result.success(emptyList())
+            val semaphore = Semaphore(DRIVE_SYNC_CONCURRENCY)
+            val perFolderResults = coroutineScope {
+                folders.map { folder ->
+                    async {
+                        runCatching { fetchFolderFilesRecursively(folder, semaphore) }
+                    }
+                }.awaitAll()
+            }
+
             val collected = mutableListOf<DriveSyncedFile>()
             val globalSeenFileIds = mutableSetOf<String>()
             var lastError: Throwable? = null
 
-            for (folder in folders) {
-                try {
-                    val items = fetchFolderFilesRecursively(folder)
+            for (res in perFolderResults) {
+                res.onSuccess { items ->
                     for (item in items) {
                         if (!item.isSubFolder && globalSeenFileIds.add(item.fileId)) {
                             collected.add(item)
                         }
                     }
-                } catch (e: Exception) {
-                    lastError = e
+                }.onFailure { err ->
+                    lastError = err
                 }
             }
 
-            if (collected.isEmpty() && lastError != null) {
-                Result.failure(lastError)
+            val capturedError = lastError
+            if (collected.isEmpty() && capturedError != null) {
+                Result.failure(capturedError)
             } else {
                 Result.success(collected)
             }
         }
 
-    private fun fetchFolderFilesRecursively(rootFolder: DriveFolderLink): List<DriveSyncedFile> {
+    private suspend fun fetchFolderFilesRecursively(
+        rootFolder: DriveFolderLink,
+        semaphore: Semaphore
+    ): List<DriveSyncedFile> = coroutineScope {
         data class QueueNode(
             val folderId: String,
             val pathSegments: List<String>,
@@ -79,56 +102,68 @@ class GoogleDriveSyncRepository(
 
         val maxDepth = 3
         val maxSubfoldersPerRoot = 30
-        val visitedFolderIds = mutableSetOf(rootFolder.folderId)
-        val queue = ArrayDeque<QueueNode>()
-        queue.add(QueueNode(rootFolder.folderId, emptyList(), 0))
-
+        val visitedFolderIds = Collections.synchronizedSet(mutableSetOf(rootFolder.folderId))
+        var currentLevel = listOf(QueueNode(rootFolder.folderId, emptyList(), 0))
         val files = mutableListOf<DriveSyncedFile>()
         var fetchedFolders = 0
 
-        while (queue.isNotEmpty() && fetchedFolders <= maxSubfoldersPerRoot) {
-            val current = queue.removeFirst()
-            val html = runCatching { fetchEmbeddedFolderHtml(current.folderId, rootFolder.title) }.getOrElse { err ->
-                if (current.depth == 0) throw err else ""
-            }
-            fetchedFolders++
-            if (html.isBlank()) continue
+        while (currentLevel.isNotEmpty() && fetchedFolders <= maxSubfoldersPerRoot) {
+            val remainingBudget = (maxSubfoldersPerRoot + 1 - fetchedFolders).coerceAtLeast(1)
+            val batch = currentLevel.take(remainingBudget)
+            fetchedFolders += batch.size
 
-            val currentSubPath = current.pathSegments.joinToString(" / ")
-            val scopedFolder = rootFolder.copy(
-                folderId = current.folderId,
-                title = if (currentSubPath.isNotBlank()) "${rootFolder.title} / $currentSubPath" else rootFolder.title
-            )
-            val entries = parseEmbeddedFolderHtml(html, scopedFolder)
+            val batchResults = batch.map { node ->
+                async(Dispatchers.IO) {
+                    semaphore.withPermit {
+                        val html = runCatching {
+                            fetchEmbeddedFolderHtml(node.folderId, rootFolder.title)
+                        }.getOrElse { err ->
+                            if (node.depth == 0) throw err else ""
+                        }
+                        node to html
+                    }
+                }
+            }.awaitAll()
 
-            for (entry in entries) {
-                if (entry.isSubFolder) {
-                    if (current.depth < maxDepth &&
-                        visitedFolderIds.size <= maxSubfoldersPerRoot &&
-                        visitedFolderIds.add(entry.fileId)
-                    ) {
-                        queue.add(
-                            QueueNode(
-                                folderId = entry.fileId,
-                                pathSegments = current.pathSegments + entry.name,
-                                depth = current.depth + 1
+            val nextLevel = mutableListOf<QueueNode>()
+            for ((node, html) in batchResults) {
+                if (html.isBlank()) continue
+                val currentSubPath = node.pathSegments.joinToString(" / ")
+                val scopedFolder = rootFolder.copy(
+                    folderId = node.folderId,
+                    title = if (currentSubPath.isNotBlank()) "${rootFolder.title} / $currentSubPath" else rootFolder.title
+                )
+                val entries = parseEmbeddedFolderHtml(html, scopedFolder)
+                for (entry in entries) {
+                    if (entry.isSubFolder) {
+                        if (node.depth < maxDepth &&
+                            visitedFolderIds.size <= maxSubfoldersPerRoot &&
+                            visitedFolderIds.add(entry.fileId)
+                        ) {
+                            nextLevel.add(
+                                QueueNode(
+                                    folderId = entry.fileId,
+                                    pathSegments = node.pathSegments + entry.name,
+                                    depth = node.depth + 1
+                                )
+                            )
+                        }
+                    } else {
+                        files.add(
+                            entry.copy(
+                                folderId = rootFolder.folderId,
+                                rootFolderTitle = rootFolder.title,
+                                subFolderPath = currentSubPath,
+                                folderTitle = if (currentSubPath.isNotBlank()) "${rootFolder.title} / $currentSubPath" else rootFolder.title
                             )
                         )
                     }
-                } else {
-                    files.add(
-                        entry.copy(
-                            folderId = rootFolder.folderId,
-                            rootFolderTitle = rootFolder.title,
-                            subFolderPath = currentSubPath,
-                            folderTitle = if (currentSubPath.isNotBlank()) "${rootFolder.title} / $currentSubPath" else rootFolder.title
-                        )
-                    )
                 }
             }
+            currentLevel = nextLevel
         }
 
-        return files
+        files
     }
 
     private fun fetchEmbeddedFolderHtml(folderId: String, displayTitle: String): String {
@@ -642,5 +677,200 @@ class GoogleDriveSyncRepository(
         "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         "xls", "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         else -> fallback
+    }
+
+    suspend fun saveSyncedIndex(context: Context, files: List<DriveSyncedFile>) = withContext(Dispatchers.IO) {
+        saveSyncedIndexToDir(File(context.filesDir, "course_cache"), files)
+    }
+
+    internal fun saveSyncedIndexToDir(cacheRoot: File, files: List<DriveSyncedFile>) {
+        runCatching {
+            cacheRoot.mkdirs()
+            val indexFile = File(cacheRoot, INDEX_FILE_NAME)
+            val tmpFile = File(cacheRoot, "$INDEX_FILE_NAME.tmp")
+            val json = buildString {
+                append('[')
+                files.forEachIndexed { idx, f ->
+                    if (idx > 0) append(',')
+                    append('{')
+                    append("\"fileId\":\"").append(escapeJson(f.fileId)).append("\",")
+                    append("\"folderId\":\"").append(escapeJson(f.folderId)).append("\",")
+                    append("\"folderTitle\":\"").append(escapeJson(f.folderTitle)).append("\",")
+                    append("\"name\":\"").append(escapeJson(f.name)).append("\",")
+                    append("\"mimeHint\":\"").append(escapeJson(f.mimeHint)).append("\",")
+                    append("\"viewUrl\":\"").append(escapeJson(f.viewUrl)).append("\",")
+                    append("\"downloadUrl\":\"").append(escapeJson(f.downloadUrl)).append("\",")
+                    append("\"subFolderPath\":\"").append(escapeJson(f.subFolderPath)).append("\",")
+                    append("\"rootFolderTitle\":\"").append(escapeJson(f.rootFolderTitle)).append("\"")
+                    append('}')
+                }
+                append(']')
+            }
+            tmpFile.writeText(json, Charsets.UTF_8)
+            if (indexFile.exists()) indexFile.delete()
+            tmpFile.renameTo(indexFile)
+        }
+    }
+
+    suspend fun loadSyncedIndex(context: Context): List<DriveSyncedFile> = withContext(Dispatchers.IO) {
+        loadSyncedIndexFromDir(File(context.filesDir, "course_cache"))
+    }
+
+    internal fun loadSyncedIndexFromDir(cacheRoot: File): List<DriveSyncedFile> {
+        return runCatching {
+            val indexFile = File(cacheRoot, INDEX_FILE_NAME)
+            if (!indexFile.exists() || indexFile.length() <= 0L) return emptyList()
+            val raw = indexFile.readText(Charsets.UTF_8)
+            parseJsonFlatObjects(raw).mapNotNull { map ->
+                val fileId = map["fileId"].orEmpty()
+                val name = map["name"].orEmpty()
+                if (fileId.isBlank() || name.isBlank()) return@mapNotNull null
+                val folderTitle = map["folderTitle"].orEmpty().ifBlank { "Study Library" }
+                DriveSyncedFile(
+                    fileId = fileId,
+                    folderId = map["folderId"].orEmpty(),
+                    folderTitle = folderTitle,
+                    name = name,
+                    isSubFolder = false,
+                    mimeHint = map["mimeHint"].orEmpty().ifBlank { "application/pdf" },
+                    viewUrl = map["viewUrl"].orEmpty(),
+                    downloadUrl = map["downloadUrl"].orEmpty(),
+                    subFolderPath = map["subFolderPath"].orEmpty(),
+                    rootFolderTitle = map["rootFolderTitle"].orEmpty().ifBlank { folderTitle }
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun escapeJson(value: String): String = buildString(value.length + 8) {
+        for (ch in value) {
+            when (ch) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> append(ch)
+            }
+        }
+    }
+
+    private fun parseJsonFlatObjects(json: String): List<Map<String, String>> {
+        val objects = mutableListOf<Map<String, String>>()
+        var i = 0
+        val n = json.length
+        fun skipWs() {
+            while (i < n && json[i].isWhitespace()) i++
+        }
+        fun readString(): String? {
+            if (i >= n || json[i] != '"') return null
+            i++
+            val sb = StringBuilder()
+            while (i < n) {
+                val c = json[i++]
+                when (c) {
+                    '"' -> return sb.toString()
+                    '\\' -> {
+                        if (i >= n) return null
+                        when (val esc = json[i++]) {
+                            '"', '\\', '/' -> sb.append(esc)
+                            'n' -> sb.append('\n')
+                            'r' -> sb.append('\r')
+                            't' -> sb.append('\t')
+                            'b' -> sb.append('\b')
+                            'f' -> sb.append('\u000C')
+                            'u' -> {
+                                if (i + 4 <= n) {
+                                    val hex = json.substring(i, i + 4).toIntOrNull(16)
+                                    if (hex != null) sb.append(hex.toChar())
+                                    i += 4
+                                }
+                            }
+                            else -> sb.append(esc)
+                        }
+                    }
+                    else -> sb.append(c)
+                }
+            }
+            return null
+        }
+
+        skipWs()
+        if (i >= n || json[i] != '[') return emptyList()
+        i++
+        while (i < n) {
+            skipWs()
+            if (i < n && json[i] == ']') break
+            if (i < n && json[i] == ',') {
+                i++
+                continue
+            }
+            if (i >= n || json[i] != '{') break
+            i++
+            val map = mutableMapOf<String, String>()
+            while (i < n) {
+                skipWs()
+                if (i < n && json[i] == '}') {
+                    i++
+                    break
+                }
+                if (i < n && json[i] == ',') {
+                    i++
+                    continue
+                }
+                val key = readString() ?: break
+                skipWs()
+                if (i >= n || json[i] != ':') break
+                i++
+                skipWs()
+                val valStr = readString() ?: break
+                map[key] = valStr
+            }
+            if (map.isNotEmpty()) objects.add(map)
+        }
+        return objects
+    }
+
+    suspend fun getDownloadedFileIds(context: Context): Set<String> = withContext(Dispatchers.IO) {
+        getDownloadedFileIdsFromDir(File(context.filesDir, "course_cache"))
+    }
+
+    internal fun getDownloadedFileIdsFromDir(cacheRoot: File): Set<String> {
+        return runCatching {
+            if (!cacheRoot.exists()) return emptySet()
+            val ids = mutableSetOf<String>()
+            cacheRoot.listFiles()?.forEach { dir ->
+                if (dir.isDirectory && dir.name.startsWith("gdrive_")) {
+                    val hasValidFile = dir.listFiles()?.any { file ->
+                        file.isFile &&
+                            !file.name.endsWith(".tmp") &&
+                            !file.name.startsWith("Drive Item", ignoreCase = true) &&
+                            !file.name.startsWith("Drive File", ignoreCase = true) &&
+                            file.length() > 0L
+                    } == true
+                    if (hasValidFile) {
+                        ids.add(dir.name.removePrefix("gdrive_"))
+                    }
+                }
+            }
+            ids
+        }.getOrDefault(emptySet())
+    }
+
+    suspend fun deleteOfflineFile(context: Context, fileId: String): Boolean = withContext(Dispatchers.IO) {
+        deleteOfflineFileFromDir(File(context.filesDir, "course_cache"), fileId)
+    }
+
+    internal fun deleteOfflineFileFromDir(cacheRoot: File, fileId: String): Boolean {
+        val safeFileId = fileId.replace(Regex("[^a-zA-Z0-9_-]"), "").take(128)
+        if (safeFileId.isBlank()) return false
+        val itemCacheDir = File(cacheRoot, "gdrive_$safeFileId")
+        if (!itemCacheDir.exists()) return true
+        return runCatching {
+            if (!itemCacheDir.canonicalPath.startsWith(cacheRoot.canonicalPath + File.separator)) {
+                return false
+            }
+            itemCacheDir.deleteRecursively()
+        }.getOrDefault(false)
     }
 }
