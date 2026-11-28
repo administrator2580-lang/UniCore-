@@ -116,6 +116,7 @@ import com.example.ui.theme.UniCoreTheme
 import com.example.ui.viewmodel.UiState
 import com.example.ui.viewmodel.UniCoreViewModel
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
@@ -127,13 +128,17 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
+        runCatching {
+            if (FirebaseApp.getApps(applicationContext).isEmpty()) {
+                FirebaseApp.initializeApp(applicationContext)
+            }
+        }
         runCatching { configureAppCheck(this, intent) }
-        runCatching { initializeMobileAdsOnce(applicationContext) }
         runCatching { UniCoreNotificationManager.ensureChannel(applicationContext) }
 
-        enableEdgeToEdge()
         setContent {
             val prefsRepository = remember { UserPreferencesRepository(applicationContext) }
             val prefs by prefsRepository.preferencesFlow.collectAsStateWithLifecycle(initialValue = UserPreferences())
@@ -197,10 +202,33 @@ private val CompactBottomTabs = listOf(
 fun UniCoreApp(
     prefs: UserPreferences,
     prefsRepository: UserPreferencesRepository,
-    auth: FirebaseAuth = Firebase.auth
+    authOverride: FirebaseAuth? = null
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var currentUser by remember { mutableStateOf(auth.currentUser) }
+
+    LaunchedEffect(Unit) {
+        initializeMobileAdsOnce(context.applicationContext)
+    }
+
+    val auth = remember(context, authOverride) {
+        authOverride ?: runCatching {
+            if (FirebaseApp.getApps(context.applicationContext).isEmpty()) {
+                FirebaseApp.initializeApp(context.applicationContext)
+            }
+            Firebase.auth
+        }.getOrNull()
+    }
+
+    if (auth == null) {
+        StartupServiceUnavailableGate(
+            title = LocalAppStrings.current.appName,
+            message = "Unable to initialize authentication services. Check network or Firebase configuration and reopen the app."
+        )
+        return
+    }
+
+    var currentUser by remember(auth) { mutableStateOf(auth.currentUser) }
     DisposableEffect(auth) {
         val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
             currentUser = firebaseAuth.currentUser
@@ -257,7 +285,23 @@ private fun UniCoreAuthenticatedShell(
     val context = LocalContext.current
     val strings = LocalAppStrings.current
     val scope = rememberCoroutineScope()
-    val credentialManager = remember(context) { CredentialManager.create(context) }
+    val credentialManager = remember(context) {
+        runCatching { CredentialManager.create(context) }.getOrNull()
+    }
+    val firestoreDb = remember(context) {
+        runCatching {
+            val databaseId = context.applicationContext.getString(R.string.firestore_database_id)
+            FirebaseFirestore.getInstance(databaseId)
+        }.getOrNull()
+    }
+
+    if (firestoreDb == null) {
+        StartupServiceUnavailableGate(
+            title = strings.appName,
+            message = "Unable to connect to academic database services. Please restart UniCore."
+        )
+        return
+    }
 
     val viewModel: UniCoreViewModel = viewModel(
         key = currentUserId,
@@ -266,12 +310,10 @@ private fun UniCoreAuthenticatedShell(
                 val app = checkNotNull(this[APPLICATION_KEY]) {
                     "APPLICATION_KEY missing from CreationExtras"
                 }
-                val databaseId = app.getString(R.string.firestore_database_id)
-                val db = FirebaseFirestore.getInstance(databaseId)
                 UniCoreViewModel(
                     appContext = app.applicationContext,
-                    repository = UniCoreRepository(db),
-                    governance = UniCoreGovernanceRepository(db),
+                    repository = UniCoreRepository(firestoreDb),
+                    governance = UniCoreGovernanceRepository(firestoreDb),
                     aiRepository = AiTutorRepository(),
                     driveSyncRepository = GoogleDriveSyncRepository(),
                     rateLimiter = RateLimiter(app.applicationContext),
@@ -992,6 +1034,50 @@ private fun AccountSuspendedGate(
                         Spacer(Modifier.size(8.dp))
                         Text(signOutLabel)
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StartupServiceUnavailableGate(
+    title: String,
+    message: String
+) {
+    Scaffold(contentWindowInsets = WindowInsets.safeDrawing) { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(24.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier.widthIn(max = 460.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.School,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(44.dp)
+                    )
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

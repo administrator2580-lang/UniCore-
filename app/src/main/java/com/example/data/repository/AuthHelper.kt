@@ -54,13 +54,17 @@ private fun resolveDefaultWebClientId(context: Context): String? {
 
 fun attemptAutoSignIn(
     context: Context,
-    credentialManager: CredentialManager,
+    credentialManager: CredentialManager?,
     onAuthSuccess: () -> Unit,
     onUnauthenticated: () -> Unit,
     scope: CoroutineScope
 ) {
-    if (Firebase.auth.currentUser != null) {
+    if (runCatching { Firebase.auth.currentUser }.getOrNull() != null) {
         onAuthSuccess()
+        return
+    }
+    if (credentialManager == null) {
+        onUnauthenticated()
         return
     }
     val clientId = resolveDefaultWebClientId(context) ?: run {
@@ -94,7 +98,7 @@ fun attemptAutoSignIn(
 
 fun onGoogleSignInClicked(
     context: Context,
-    credentialManager: CredentialManager,
+    credentialManager: CredentialManager?,
     rateLimiter: RateLimiter,
     onAuthSuccess: () -> Unit,
     onAuthError: (String) -> Unit,
@@ -102,6 +106,10 @@ fun onGoogleSignInClicked(
     onAuthCancelled: () -> Unit = {}
 ) {
     scope.launch {
+        if (credentialManager == null) {
+            onAuthError("Google Credential Manager is unavailable on this device.")
+            return@launch
+        }
         when (val decision = rateLimiter.checkAndConsume(RateLimiter.Bucket.AUTH)) {
             is RateLimiter.Decision.Blocked -> {
                 onAuthError(decision.reason)
@@ -174,18 +182,18 @@ fun onGoogleSignInClicked(
 }
 
 fun signOut(
-    credentialManager: CredentialManager,
+    credentialManager: CredentialManager?,
     scope: CoroutineScope,
     onSignOutComplete: () -> Unit = {}
 ) {
     scope.launch {
         withContext(NonCancellable) {
             try {
-                credentialManager.clearCredentialState(ClearCredentialStateRequest())
-            } catch (e: Exception) {
+                credentialManager?.clearCredentialState(ClearCredentialStateRequest())
+            } catch (e: Throwable) {
                 Log.w("Auth", "Failed to clear credential state: ${e.message}")
             } finally {
-                Firebase.auth.signOut()
+                runCatching { Firebase.auth.signOut() }
                 onSignOutComplete()
             }
         }

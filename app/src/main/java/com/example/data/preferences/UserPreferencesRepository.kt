@@ -5,10 +5,13 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import java.io.IOException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import java.util.Locale
 
@@ -51,16 +54,24 @@ private val Context.userPrefsDataStore: DataStore<Preferences> by preferencesDat
 
 class UserPreferencesRepository(private val context: Context) {
 
-    val preferencesFlow: Flow<UserPreferences> = context.userPrefsDataStore.data.map { prefs ->
-        UserPreferences(
-            language = AppLanguage.fromCode(prefs[KEY_LANGUAGE]),
-            themeMode = AppThemeMode.fromRaw(prefs[KEY_THEME_MODE]),
-            systemNotificationsEnabled = prefs[KEY_SYSTEM_NOTIFICATIONS] ?: true,
-            notificationSoundEnabled = prefs[KEY_SOUND_ENABLED] ?: true,
-            readNotificationIds = prefs[KEY_READ_NOTIFICATION_IDS] ?: emptySet(),
-            scheduledReminderIds = prefs[KEY_SCHEDULED_REMINDERS] ?: emptySet()
-        )
-    }
+    val preferencesFlow: Flow<UserPreferences> = context.userPrefsDataStore.data
+        .catch { exception ->
+            if (exception is IOException) {
+                emit(emptyPreferences())
+            } else {
+                throw exception
+            }
+        }
+        .map { prefs ->
+            UserPreferences(
+                language = AppLanguage.fromCode(prefs[KEY_LANGUAGE]),
+                themeMode = AppThemeMode.fromRaw(prefs[KEY_THEME_MODE]),
+                systemNotificationsEnabled = prefs[KEY_SYSTEM_NOTIFICATIONS] ?: true,
+                notificationSoundEnabled = prefs[KEY_SOUND_ENABLED] ?: true,
+                readNotificationIds = prefs[KEY_READ_NOTIFICATION_IDS] ?: emptySet(),
+                scheduledReminderIds = prefs[KEY_SCHEDULED_REMINDERS] ?: emptySet()
+            )
+        }
 
     suspend fun setLanguage(language: AppLanguage) {
         context.userPrefsDataStore.edit { prefs ->

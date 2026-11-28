@@ -74,7 +74,9 @@ fun AuthScreen(
     val context = LocalContext.current
     val strings = LocalAppStrings.current
     val scope = rememberCoroutineScope()
-    val credentialManager = remember(context) { CredentialManager.create(context) }
+    val credentialManager = remember(context) {
+        runCatching { CredentialManager.create(context) }.getOrNull()
+    }
     val rateLimiter = remember(context) { RateLimiter(context.applicationContext) }
 
     var isLoading by remember { mutableStateOf(false) }

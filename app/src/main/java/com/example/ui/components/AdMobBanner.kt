@@ -52,7 +52,7 @@ val mobileAdsReady: StateFlow<Boolean> = _mobileAdsReady.asStateFlow()
 fun initializeMobileAdsOnce(context: Context) {
     if (mobileAdsInitialized.compareAndSet(false, true)) {
         val appContext = context.applicationContext
-        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate).launch {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching {
                 if (BuildConfig.DEBUG) {
                     val config = RequestConfiguration.Builder()
@@ -63,7 +63,8 @@ fun initializeMobileAdsOnce(context: Context) {
                 MobileAds.initialize(appContext) {
                     _mobileAdsReady.value = true
                 }
-            }.onFailure {
+            }.onFailure { err ->
+                android.util.Log.w("AdMobBanner", "Safe MobileAds init skipped", err)
                 _mobileAdsReady.value = false
             }
         }
