@@ -126,7 +126,7 @@ import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private const val ENABLE_ADMOB_ON_STARTUP = true
+private const val ENABLE_ADMOB_ON_STARTUP = false
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
