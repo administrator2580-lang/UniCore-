@@ -3,11 +3,13 @@ import {
   Bell,
   CheckCircle2,
   ClipboardCheck,
+  ClipboardList,
   Megaphone,
   School,
   Send,
   Shield,
   ShieldAlert,
+  Video,
   X
 } from 'lucide-react';
 import { sendNotification } from '../data/firestoreService';
@@ -42,6 +44,10 @@ export default function NotificationsDrawer({
         return <Shield size={18} />;
       case 'SECURITY':
         return <ShieldAlert size={18} />;
+      case 'ASSIGNMENT':
+        return <ClipboardList size={18} />;
+      case 'ZOOM':
+        return <Video size={18} />;
       default:
         return <Megaphone size={18} />;
     }

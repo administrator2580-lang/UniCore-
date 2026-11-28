@@ -7,6 +7,7 @@ import {
   ChevronUp,
   Clock,
   Globe,
+  GraduationCap,
   Headset,
   Image as ImageIcon,
   LogOut,
@@ -23,6 +24,7 @@ import {
   Trash2,
   UserPlus,
   Users,
+  Volume2,
   X
 } from 'lucide-react';
 import {
@@ -32,8 +34,11 @@ import {
 } from '../firebase/config';
 import {
   demoteAdminToStudent,
+  demoteSuperAdminToAdmin,
   inviteAccountByEmail,
+  normalizeUserRole,
   promoteUserToAdmin,
+  promoteUserToSuperAdmin,
   replyToSupportMessage,
   revokeInvite,
   sendSupportMessage,
@@ -53,9 +58,13 @@ export default function AccountConsoleView({
   language,
   themeMode,
   desktopNotificationsEnabled,
+  soundEnabled = true,
   onSetLanguage,
   onSetThemeMode,
   onSetDesktopNotifications,
+  onSetSoundEnabled,
+  onTestSound,
+  onOpenPlacementModal,
   usersDirectory,
   roleInvites,
   supportMessages,
@@ -77,12 +86,16 @@ export default function AccountConsoleView({
   const [zeroCostLock, setZeroCostLock] = useState(Boolean(systemSettings?.zeroCostLockActive ?? false));
   const [aiCap, setAiCap] = useState(String(systemSettings?.dailyAiLimitPerUser || 20));
   const [writeCap, setWriteCap] = useState(String(systemSettings?.dailyWriteLimitPerUser || 100));
+  const [tutorialVideoTitle, setTutorialVideoTitle] = useState(systemSettings?.tutorialVideoTitle || '');
+  const [tutorialVideoUrl, setTutorialVideoUrl] = useState(systemSettings?.tutorialVideoUrl || '');
 
   useEffect(() => {
     setAiEnabled(Boolean(systemSettings?.aiEnabled ?? true));
     setZeroCostLock(Boolean(systemSettings?.zeroCostLockActive ?? false));
     setAiCap(String(systemSettings?.dailyAiLimitPerUser || 20));
     setWriteCap(String(systemSettings?.dailyWriteLimitPerUser || 100));
+    setTutorialVideoTitle(systemSettings?.tutorialVideoTitle || '');
+    setTutorialVideoUrl(systemSettings?.tutorialVideoUrl || '');
   }, [systemSettings]);
 
   const writesUsed = Number(userProfile?.writesToday || 0);
@@ -137,6 +150,23 @@ export default function AccountConsoleView({
         </div>
         <div className="m3-progress-track">
           <div className="m3-progress-fill" style={{ width: `${writesPct}%`, background: 'var(--primary)' }} />
+        </div>
+
+        <div className="m3-subsurface" style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <div className="row-gap">
+            <GraduationCap size={18} style={{ color: 'var(--primary)' }} />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>{strings.academicPlacementTitle}</div>
+              <div className="muted" style={{ fontSize: '0.82rem' }}>
+                {[userProfile?.departmentName, userProfile?.academicYear, userProfile?.sectionName]
+                  .filter(Boolean)
+                  .join(' • ') || strings.unassignedDept}
+              </div>
+            </div>
+          </div>
+          <button type="button" className="btn btn-tonal" onClick={onOpenPlacementModal}>
+            {strings.editPlacementAction}
+          </button>
         </div>
 
         <button type="button" className="btn btn-outlined" onClick={onSignOut}>
@@ -217,6 +247,22 @@ export default function AccountConsoleView({
             style={{ width: '18px', height: '18px' }}
           />
         </label>
+
+        <div className="row-between" style={{ flexWrap: 'wrap' }}>
+          <label className="row-gap" style={{ cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={soundEnabled}
+              onChange={(e) => onSetSoundEnabled?.(e.target.checked)}
+              style={{ width: '18px', height: '18px' }}
+            />
+            <Volume2 size={18} style={{ color: 'var(--primary)' }} />
+            <span>{strings.soundAlertsLabel}</span>
+          </label>
+          <button type="button" className="btn btn-tonal" onClick={onTestSound}>
+            {strings.testSoundAction}
+          </button>
+        </div>
       </div>
 
       {/* Tiered Support & Escalation Messaging */}
@@ -318,15 +364,16 @@ export default function AccountConsoleView({
             const disabled = Boolean(u.accountDisabled);
             const banUntil = Number(u.banUntilMillis || 0);
             const isTimedBanned = banUntil > Date.now();
+            const targetNormRole = normalizeUserRole(u.role);
             const canBanTarget =
               u.userId !== currentUserId &&
-              u.role !== 'SUPER_ADMIN' &&
-              (userRole === 'SUPER_ADMIN' || u.role === 'STUDENT');
+              targetNormRole !== 'SUPER_ADMIN' &&
+              (userRole === 'SUPER_ADMIN' || targetNormRole === 'STUDENT');
 
             const rLabel =
-              u.role === 'SUPER_ADMIN'
+              targetNormRole === 'SUPER_ADMIN'
                 ? strings.roleSuperAdmin
-                : u.role === 'ADMIN'
+                : targetNormRole === 'ADMIN'
                   ? strings.roleAdmin
                   : strings.roleStudent;
             return (
@@ -357,7 +404,7 @@ export default function AccountConsoleView({
                   </span>
                 </div>
 
-                {(canBanTarget || (userRole === 'SUPER_ADMIN' && u.userId !== currentUserId && u.role !== 'SUPER_ADMIN')) ? (
+                {(canBanTarget || (userRole === 'SUPER_ADMIN' && u.userId !== currentUserId)) ? (
                   <div className="chip-row">
                     {canBanTarget ? (
                       <button
@@ -370,9 +417,9 @@ export default function AccountConsoleView({
                       </button>
                     ) : null}
 
-                    {userRole === 'SUPER_ADMIN' && u.userId !== currentUserId && u.role !== 'SUPER_ADMIN' ? (
+                    {userRole === 'SUPER_ADMIN' && u.userId !== currentUserId ? (
                       <>
-                        {u.role === 'STUDENT' ? (
+                        {targetNormRole === 'STUDENT' ? (
                           <button
                             type="button"
                             className="btn btn-outlined"
@@ -380,7 +427,27 @@ export default function AccountConsoleView({
                           >
                             {strings.promoteToAdmin}
                           </button>
-                        ) : u.role === 'ADMIN' ? (
+                        ) : null}
+
+                        {targetNormRole !== 'SUPER_ADMIN' ? (
+                          <button
+                            type="button"
+                            className="btn btn-tonal"
+                            onClick={() => promoteUserToSuperAdmin(db, auth, u).catch((e) => onShowToast(e.message))}
+                          >
+                            {strings.promoteToSuperAdmin}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-outlined"
+                            onClick={() => demoteSuperAdminToAdmin(db, auth, u.userId).catch((e) => onShowToast(e.message))}
+                          >
+                            {strings.demoteToAdmin}
+                          </button>
+                        )}
+
+                        {targetNormRole === 'ADMIN' ? (
                           <button
                             type="button"
                             className="btn btn-outlined"
@@ -390,16 +457,18 @@ export default function AccountConsoleView({
                           </button>
                         ) : null}
 
-                        <button
-                          type="button"
-                          className={`btn ${disabled ? 'btn-outlined' : 'btn-danger-outlined'}`}
-                          onClick={() =>
-                            setUserAccountDisabled(db, auth, u, !disabled).catch((e) => onShowToast(e.message))
-                          }
-                        >
-                          {disabled ? <CheckCircle2 size={15} /> : <Ban size={15} />}
-                          <span>{disabled ? strings.enableAccountAction : strings.disableAccountAction}</span>
-                        </button>
+                        {targetNormRole !== 'SUPER_ADMIN' ? (
+                          <button
+                            type="button"
+                            className={`btn ${disabled ? 'btn-outlined' : 'btn-danger-outlined'}`}
+                            onClick={() =>
+                              setUserAccountDisabled(db, auth, u, !disabled).catch((e) => onShowToast(e.message))
+                            }
+                          >
+                            {disabled ? <CheckCircle2 size={15} /> : <Ban size={15} />}
+                            <span>{disabled ? strings.enableAccountAction : strings.disableAccountAction}</span>
+                          </button>
+                        ) : null}
                       </>
                     ) : null}
                   </div>
@@ -473,6 +542,24 @@ export default function AccountConsoleView({
             </div>
           </div>
 
+          <div className="field-group">
+            <label className="field-label">{strings.tutorialTitleLabel}</label>
+            <input
+              className="m3-input"
+              value={tutorialVideoTitle}
+              onChange={(e) => setTutorialVideoTitle(e.target.value)}
+            />
+          </div>
+          <div className="field-group">
+            <label className="field-label">{strings.tutorialSettingsLabel}</label>
+            <input
+              className="m3-input"
+              placeholder="https://youtube.com/..."
+              value={tutorialVideoUrl}
+              onChange={(e) => setTutorialVideoUrl(e.target.value)}
+            />
+          </div>
+
           <button
             type="button"
             className="btn btn-primary"
@@ -482,7 +569,9 @@ export default function AccountConsoleView({
                   dailyAiLimit: aiCap,
                   dailyWriteLimit: writeCap,
                   aiEnabled,
-                  zeroCostLockActive: zeroCostLock
+                  zeroCostLockActive: zeroCostLock,
+                  tutorialVideoTitle,
+                  tutorialVideoUrl
                 });
                 onShowToast(strings.savePolicyButton);
               } catch (err) {
@@ -971,13 +1060,22 @@ function InviteModal({ strings, isSuperAdmin, onClose, onSubmit }) {
             {strings.roleStudent}
           </button>
           {isSuperAdmin ? (
-            <button
-              type="button"
-              className={`m3-chip ${role === 'ADMIN' ? 'selected' : ''}`}
-              onClick={() => setRole('ADMIN')}
-            >
-              {strings.roleAdmin}
-            </button>
+            <>
+              <button
+                type="button"
+                className={`m3-chip ${role === 'ADMIN' ? 'selected' : ''}`}
+                onClick={() => setRole('ADMIN')}
+              >
+                {strings.roleAdmin}
+              </button>
+              <button
+                type="button"
+                className={`m3-chip ${role === 'SUPER_ADMIN' ? 'selected' : ''}`}
+                onClick={() => setRole('SUPER_ADMIN')}
+              >
+                {strings.roleSuperAdmin}
+              </button>
+            </>
           ) : null}
         </div>
         <div className="row-between" style={{ justifyContent: 'flex-end' }}>

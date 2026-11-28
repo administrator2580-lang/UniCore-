@@ -7,8 +7,10 @@ import {
   Eye,
   FileText,
   Folder,
+  Heart,
   Image as ImageIcon,
   Pencil,
+  PlayCircle,
   Plus,
   RefreshCw,
   School,
@@ -24,7 +26,9 @@ import {
   deleteDepartment,
   downloadCourseAttachmentBytes,
   linkDriveFolder,
+  matchesStudentScope,
   saveDepartment,
+  toggleFavoriteCourse,
   unlinkDriveFolder,
   updateCourseDetails,
   updateDriveFolder
@@ -39,6 +43,7 @@ export default function CoursesView({
   db,
   auth,
   userRole,
+  userProfile,
   courses,
   departments,
   driveFolders,
@@ -56,8 +61,10 @@ export default function CoursesView({
 }) {
   const canManage = userRole !== 'STUDENT';
   const isSuperAdmin = userRole === 'SUPER_ADMIN';
+  const favoriteIds = Array.isArray(userProfile?.favoriteCourseIds) ? userProfile.favoriteCourseIds : [];
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFilter, setSelectedFilter] = useState(null);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedDepartmentId, setSelectedDepartmentId] = useState(null);
   const [selectedYear, setSelectedYear] = useState(null);
   const [selectedLibrarySection, setSelectedLibrarySection] = useState(null);
@@ -88,6 +95,7 @@ export default function CoursesView({
   const visibleDriveFolders = useMemo(
     () =>
       driveFolders.filter((f) => {
+        if (!matchesStudentScope(userProfile, userRole, f)) return false;
         const matchesDept =
           !selectedDept ||
           f.departmentId === selectedDept.id ||
@@ -95,15 +103,15 @@ export default function CoursesView({
         const matchesYear = !selectedYear || f.academicYear === selectedYear;
         return matchesDept && matchesYear;
       }),
-    [driveFolders, selectedDept, selectedYear]
+    [driveFolders, userProfile, userRole, selectedDept, selectedYear]
   );
 
   const scopedDriveFiles = useMemo(() => {
     const actualFiles = driveFiles.filter((file) => !file.isSubFolder);
-    if (!selectedDept && !selectedYear) return actualFiles;
+    if (!selectedDept && !selectedYear && canManage) return actualFiles;
     const allowedIds = new Set(visibleDriveFolders.map((f) => f.folderId));
     return actualFiles.filter((file) => allowedIds.has(file.folderId));
-  }, [driveFiles, visibleDriveFolders, selectedDept, selectedYear]);
+  }, [driveFiles, visibleDriveFolders, selectedDept, selectedYear, canManage]);
 
   const librarySections = useMemo(() => {
     const set = new Set();
@@ -149,6 +157,8 @@ export default function CoursesView({
   const filteredCourses = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return courses.filter((course) => {
+      if (!matchesStudentScope(userProfile, userRole, course)) return false;
+      if (favoritesOnly && !favoriteIds.includes(course.id)) return false;
       const matchesFilter = !selectedFilter || course.materialType === selectedFilter;
       const matchesDept =
         !selectedDept ||
@@ -161,10 +171,11 @@ export default function CoursesView({
         (course.description || '').toLowerCase().includes(q) ||
         (course.attachmentName || '').toLowerCase().includes(q) ||
         (course.departmentName || '').toLowerCase().includes(q) ||
-        (course.academicYear || '').toLowerCase().includes(q);
+        (course.academicYear || '').toLowerCase().includes(q) ||
+        (course.sectionName || '').toLowerCase().includes(q);
       return matchesFilter && matchesDept && matchesYear && matchesQuery;
     });
-  }, [courses, selectedFilter, selectedDept, selectedYear, searchQuery]);
+  }, [courses, userProfile, userRole, favoritesOnly, favoriteIds, selectedFilter, selectedDept, selectedYear, searchQuery]);
 
   const openSafeExternalUrl = async (url) => {
     const check = validateOptionalHttpsUrl(url);
@@ -414,14 +425,27 @@ export default function CoursesView({
         </div>
       ) : null}
 
-      {/* Material Type Chips */}
+      {/* Material Type & Favorites Chips */}
       <div className="chip-scroll">
         <button
           type="button"
-          className={`m3-chip ${selectedFilter === null ? 'selected' : ''}`}
-          onClick={() => setSelectedFilter(null)}
+          className={`m3-chip ${selectedFilter === null && !favoritesOnly ? 'selected' : ''}`}
+          onClick={() => {
+            setSelectedFilter(null);
+            setFavoritesOnly(false);
+          }}
         >
           {strings.allTypes}
+        </button>
+        <button
+          type="button"
+          className={`m3-chip ${favoritesOnly ? 'selected' : ''}`}
+          onClick={() => setFavoritesOnly(!favoritesOnly)}
+        >
+          <Heart size={14} fill={favoritesOnly ? 'currentColor' : 'none'} />
+          <span>
+            {strings.favoritesFilter} ({favoriteIds.length})
+          </span>
         </button>
         {MATERIAL_TYPES.map((type) => (
           <button
@@ -653,15 +677,15 @@ export default function CoursesView({
       ) : (
         filteredCourses.map((course) => {
           const kb = Math.max(1, Math.floor((course.attachmentSizeBytes || 0) / 1024));
+          const isFav = favoriteIds.includes(course.id);
           return (
             <div key={course.id} className="m3-card">
               <div className="row-between" style={{ flexWrap: 'wrap' }}>
                 <div className="chip-row">
                   <span className="pill pill-primary">{String(course.materialType || 'NOTES').replace('_', ' ')}</span>
-                  {course.departmentName ? (
+                  {course.departmentName || course.academicYear || course.sectionName ? (
                     <span className="pill pill-secondary">
-                      {course.departmentName}
-                      {course.academicYear ? ` • ${course.academicYear}` : ''}
+                      {[course.departmentName, course.academicYear, course.sectionName].filter(Boolean).join(' • ')}
                     </span>
                   ) : null}
                 </div>
@@ -669,6 +693,17 @@ export default function CoursesView({
                   <span className="muted" style={{ fontSize: '0.82rem' }}>
                     {strings.byInstructor} {course.instructorName}
                   </span>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    style={{ color: isFav ? 'var(--error)' : 'var(--text-secondary)' }}
+                    onClick={() =>
+                      toggleFavoriteCourse(db, auth, course.id, favoriteIds).catch((e) => onShowToast(e.message))
+                    }
+                    title={isFav ? strings.unfavoriteAction : strings.favoriteAction}
+                  >
+                    <Heart size={17} fill={isFav ? 'currentColor' : 'none'} />
+                  </button>
                   {canManage ? (
                     <>
                       <button
@@ -720,8 +755,8 @@ export default function CoursesView({
                 </button>
               ) : null}
 
-              {course.materialLink ? (
-                <div>
+              <div className="row-gap" style={{ flexWrap: 'wrap' }}>
+                {course.materialLink ? (
                   <button
                     type="button"
                     className="btn btn-outlined"
@@ -730,8 +765,19 @@ export default function CoursesView({
                     <ExternalLink size={16} />
                     <span>{strings.openResource}</span>
                   </button>
-                </div>
-              ) : null}
+                ) : null}
+
+                {course.videoUrl ? (
+                  <button
+                    type="button"
+                    className="btn btn-tonal"
+                    onClick={() => openSafeExternalUrl(course.videoUrl)}
+                  >
+                    <PlayCircle size={16} />
+                    <span>{course.videoTitle || strings.watchVideoAction}</span>
+                  </button>
+                ) : null}
+              </div>
             </div>
           );
         })
@@ -982,6 +1028,9 @@ function CreateCourseModal({ strings, departments, initialDeptId, initialYear, o
   const [file, setFile] = useState(null);
   const [deptId, setDeptId] = useState(initialDeptId);
   const [year, setYear] = useState(initialYear);
+  const [sectionName, setSectionName] = useState('');
+  const [videoTitle, setVideoTitle] = useState('');
+  const [videoUrl, setVideoUrl] = useState('');
   const [saving, setSaving] = useState(false);
 
   const chosenDept = departments.find((d) => d.id === deptId) || null;
@@ -1013,7 +1062,10 @@ function CreateCourseModal({ strings, departments, initialDeptId, initialYear, o
       file,
       departmentId: chosenDept?.id || null,
       departmentName: chosenDept?.name || null,
-      academicYear: year || null
+      academicYear: year || null,
+      sectionName: sectionName || null,
+      videoTitle,
+      videoUrl
     });
     setSaving(false);
   };
@@ -1079,6 +1131,16 @@ function CreateCourseModal({ strings, departments, initialDeptId, initialYear, o
         />
 
         <div className="field-group">
+          <label className="field-label">{strings.sectionLabel}</label>
+          <input
+            className="m3-input"
+            placeholder={strings.allSectionsOption}
+            value={sectionName}
+            onChange={(e) => setSectionName(e.target.value)}
+          />
+        </div>
+
+        <div className="field-group">
           <label className="field-label">{strings.optionalLinkAndNotes}</label>
           <input
             className="m3-input"
@@ -1086,6 +1148,26 @@ function CreateCourseModal({ strings, departments, initialDeptId, initialYear, o
             value={materialLink}
             onChange={(e) => setMaterialLink(e.target.value)}
           />
+        </div>
+
+        <div className="row-gap">
+          <div className="field-group">
+            <label className="field-label">{strings.lectureVideoTitleLabel}</label>
+            <input
+              className="m3-input"
+              value={videoTitle}
+              onChange={(e) => setVideoTitle(e.target.value)}
+            />
+          </div>
+          <div className="field-group">
+            <label className="field-label">{strings.lectureVideoUrlLabel}</label>
+            <input
+              className="m3-input"
+              placeholder="https://youtube.com/..."
+              value={videoUrl}
+              onChange={(e) => setVideoUrl(e.target.value)}
+            />
+          </div>
         </div>
 
         <div className="chip-scroll">
@@ -1119,6 +1201,9 @@ function EditCourseModal({ strings, course, departments, onClose, onSubmit }) {
   const [description, setDescription] = useState(course.description || '');
   const [deptId, setDeptId] = useState(course.departmentId || '');
   const [year, setYear] = useState(course.academicYear || '');
+  const [sectionName, setSectionName] = useState(course.sectionName || '');
+  const [videoTitle, setVideoTitle] = useState(course.videoTitle || '');
+  const [videoUrl, setVideoUrl] = useState(course.videoUrl || '');
   const chosenDept = departments.find((d) => d.id === deptId) || null;
 
   return (
@@ -1134,7 +1219,10 @@ function EditCourseModal({ strings, course, departments, onClose, onSubmit }) {
             description,
             departmentId: chosenDept?.id || null,
             departmentName: chosenDept?.name || null,
-            academicYear: year || null
+            academicYear: year || null,
+            sectionName: sectionName || null,
+            videoTitle,
+            videoUrl
           });
         }}
       >
@@ -1155,6 +1243,20 @@ function EditCourseModal({ strings, course, departments, onClose, onSubmit }) {
           onChangeDept={(d) => setDeptId(d?.id || '')}
           onChangeYear={setYear}
         />
+        <div className="field-group">
+          <label className="field-label">{strings.sectionLabel}</label>
+          <input className="m3-input" placeholder={strings.allSectionsOption} value={sectionName} onChange={(e) => setSectionName(e.target.value)} />
+        </div>
+        <div className="row-gap">
+          <div className="field-group">
+            <label className="field-label">{strings.lectureVideoTitleLabel}</label>
+            <input className="m3-input" value={videoTitle} onChange={(e) => setVideoTitle(e.target.value)} />
+          </div>
+          <div className="field-group">
+            <label className="field-label">{strings.lectureVideoUrlLabel}</label>
+            <input className="m3-input" placeholder="https://..." value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)} />
+          </div>
+        </div>
         <div className="row-between" style={{ justifyContent: 'flex-end' }}>
           <button type="button" className="btn btn-text" onClick={onClose}>
             {strings.cancelAction}

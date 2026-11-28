@@ -34,6 +34,53 @@ import {
 export const BOOTSTRAPPED_SUPER_ADMIN_EMAIL = 'fvathyvhmed@gmail.com';
 const EMAIL_REGEX = /^[a-z0-9_.+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
 
+export function normalizeUserRole(raw) {
+  const upper = String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[-\s]+/g, '_');
+  if (upper === 'SUPER_ADMIN' || upper === 'SUPERADMIN') return 'SUPER_ADMIN';
+  if (upper === 'ADMIN') return 'ADMIN';
+  return 'STUDENT';
+}
+
+export function matchesStudentScope(userProfile, userRole, item) {
+  if (normalizeUserRole(userRole) !== 'STUDENT') return true;
+  if (!userProfile || !userProfile.placementCompleted) return true;
+
+  const itemDeptId = item?.departmentId || '';
+  const itemDeptName = item?.departmentName || '';
+  const itemYear = item?.academicYear || '';
+  const itemSection = item?.sectionName || '';
+
+  const pDeptId = userProfile.departmentId || '';
+  const pDeptName = userProfile.departmentName || '';
+  const pYear = userProfile.academicYear || '';
+  const pSection = userProfile.sectionName || '';
+
+  const deptMatches =
+    (!itemDeptId && !itemDeptName) ||
+    itemDeptId.toUpperCase() === 'ALL' ||
+    itemDeptName.toUpperCase() === 'ALL' ||
+    (!pDeptId && !pDeptName) ||
+    (pDeptId && itemDeptId === pDeptId) ||
+    (pDeptName && itemDeptName.trim().toLowerCase() === pDeptName.trim().toLowerCase());
+
+  const yearMatches =
+    !itemYear ||
+    itemYear.toUpperCase() === 'ALL' ||
+    !pYear ||
+    itemYear.trim().toLowerCase() === pYear.trim().toLowerCase();
+
+  const sectionMatches =
+    !itemSection ||
+    itemSection.toUpperCase() === 'ALL' ||
+    !pSection ||
+    itemSection.trim().toLowerCase() === pSection.trim().toLowerCase();
+
+  return deptMatches && yearMatches && sectionMatches;
+}
+
 export function currentUtcDayKey() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -138,9 +185,11 @@ export async function ensureUserSessionProfile(db, auth) {
       getDoc(doc(db, 'users', uid)).catch(() => null)
     ]);
 
-    const hasPendingAdminInvite = pendingInvite?.assignedRole === 'ADMIN';
+    const pendingRole = normalizeUserRole(pendingInvite?.assignedRole);
+    const hasPendingSuperInvite = Boolean(pendingInvite && pendingRole === 'SUPER_ADMIN');
+    const hasPendingAdminInvite = Boolean(pendingInvite && pendingRole === 'ADMIN');
     const resolvedRole =
-      isBootstrappedSuperAdmin || hasSuperAdminDoc
+      isBootstrappedSuperAdmin || hasSuperAdminDoc || hasPendingSuperInvite
         ? 'SUPER_ADMIN'
         : hasAdminDoc || hasPendingAdminInvite
           ? 'ADMIN'
@@ -179,8 +228,15 @@ export async function ensureUserSessionProfile(db, auth) {
       }
     }
 
-    // Step 1: Pending Admin Invite -> /admins/{uid} before claiming invite
-    if (hasPendingAdminInvite && !hasAdminDoc && pendingInvite && normalizedEmail) {
+    // Step 1: Pending Super Admin or Admin Invite -> marker collection before claiming invite
+    if (hasPendingSuperInvite && !hasSuperAdminDoc && pendingInvite && normalizedEmail) {
+      await setDoc(doc(db, 'super_admins', uid), {
+        userId: uid,
+        email: normalizedEmail,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+    } else if (hasPendingAdminInvite && !hasAdminDoc && pendingInvite && normalizedEmail) {
       await setDoc(doc(db, 'admins', uid), {
         userId: uid,
         email: normalizedEmail,
@@ -208,14 +264,19 @@ export async function ensureUserSessionProfile(db, auth) {
       });
     } else if (userSnap && userSnap.exists()) {
       const data = userSnap.data() || {};
+      const existingNormalized = normalizeUserRole(data.role);
       const updates = { updatedAt: serverTimestamp() };
       if (data.quotaDayKey !== today) {
         updates.aiCallsToday = 0;
         updates.writesToday = 0;
         updates.quotaDayKey = today;
       }
-      if (hasPendingAdminInvite && data.role === 'STUDENT') {
+      if (resolvedRole === 'SUPER_ADMIN' && existingNormalized !== 'SUPER_ADMIN') {
+        updates.role = 'SUPER_ADMIN';
+      } else if (hasPendingAdminInvite && existingNormalized === 'STUDENT') {
         updates.role = 'ADMIN';
+      } else if (data.role && data.role !== existingNormalized) {
+        updates.role = existingNormalized;
       }
       if (Object.keys(updates).length > 1) {
         await updateDoc(userRef, updates).catch(() => {});
@@ -252,8 +313,8 @@ export async function ensureUserSessionProfile(db, auth) {
     const effectiveRole =
       resolvedRole !== 'STUDENT'
         ? resolvedRole
-        : userSnap?.exists?.() && ['ADMIN', 'SUPER_ADMIN', 'STUDENT'].includes(userSnap.data()?.role)
-          ? userSnap.data().role
+        : userSnap?.exists?.()
+          ? normalizeUserRole(userSnap.data()?.role)
           : resolvedRole;
 
     writeSessionMeta(uid, { role: effectiveRole });
@@ -546,17 +607,31 @@ export async function sendNotification(db, auth, { title, body, category = 'ANNO
 export async function createCourseWithOptionalFile(
   db,
   auth,
-  { title, description, materialLink, materialType, file, departmentId, departmentName, academicYear }
+  {
+    title,
+    description,
+    materialLink,
+    materialType,
+    file,
+    departmentId,
+    departmentName,
+    academicYear,
+    sectionName,
+    videoUrl,
+    videoTitle
+  }
 ) {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Sign in required.');
-  assertCleanText(`${title} ${description}`);
+  assertCleanText(`${title} ${description} ${videoTitle || ''}`);
   const tRes = validateBoundedText(title, 'Course title', 3, 100);
   if (!tRes.valid) throw new Error(tRes.reason);
   const dRes = validateBoundedText(description, 'Description', 1, 600);
   if (!dRes.valid) throw new Error(dRes.reason);
   const lRes = validateOptionalHttpsUrl(materialLink);
   if (!lRes.valid) throw new Error(lRes.reason);
+  const vRes = validateOptionalHttpsUrl(videoUrl);
+  if (!vRes.valid) throw new Error(vRes.reason);
 
   let validated = null;
   const encodedChunks = [];
@@ -588,12 +663,19 @@ export async function createCourseWithOptionalFile(
   };
 
   if (lRes.value) payload.materialLink = lRes.value;
+  if (vRes.value) payload.videoUrl = vRes.value;
+  if (videoTitle && sanitizeText(videoTitle)) {
+    payload.videoTitle = sanitizeText(videoTitle).slice(0, 120);
+  }
   if (departmentId && isValidId(departmentId)) payload.departmentId = departmentId;
   if (departmentName && sanitizeText(departmentName).length >= 2) {
     payload.departmentName = sanitizeText(departmentName).slice(0, 80);
   }
   if (academicYear && sanitizeText(academicYear)) {
     payload.academicYear = sanitizeText(academicYear).slice(0, 40);
+  }
+  if (sectionName && sanitizeText(sectionName)) {
+    payload.sectionName = sanitizeText(sectionName).slice(0, 40);
   }
   if (validated) {
     payload.attachmentName = validated.originalName.slice(0, 140);
@@ -633,12 +715,17 @@ export async function createCourseWithOptionalFile(
   });
 }
 
-export async function updateCourseDetails(db, { courseId, title, description, departmentId, departmentName, academicYear }) {
-  assertCleanText(`${title} ${description}`);
+export async function updateCourseDetails(
+  db,
+  { courseId, title, description, departmentId, departmentName, academicYear, sectionName, videoUrl, videoTitle }
+) {
+  assertCleanText(`${title} ${description} ${videoTitle || ''}`);
   const tRes = validateBoundedText(title, 'Course title', 3, 100);
   if (!tRes.valid) throw new Error(tRes.reason);
   const dRes = validateBoundedText(description, 'Description', 1, 600);
   if (!dRes.valid) throw new Error(dRes.reason);
+  const vRes = validateOptionalHttpsUrl(videoUrl);
+  if (!vRes.valid) throw new Error(vRes.reason);
 
   const updates = {
     title: tRes.value,
@@ -649,6 +736,9 @@ export async function updateCourseDetails(db, { courseId, title, description, de
         ? sanitizeText(departmentName).slice(0, 80)
         : deleteField(),
     academicYear: academicYear && sanitizeText(academicYear) ? sanitizeText(academicYear).slice(0, 40) : deleteField(),
+    sectionName: sectionName && sanitizeText(sectionName) ? sanitizeText(sectionName).slice(0, 40) : deleteField(),
+    videoUrl: vRes.value ? vRes.value : deleteField(),
+    videoTitle: videoTitle && sanitizeText(videoTitle) ? sanitizeText(videoTitle).slice(0, 120) : deleteField(),
     updatedAt: serverTimestamp()
   };
 
@@ -1200,9 +1290,7 @@ export async function inviteAccountByEmail(db, auth, { rawEmail, rawNameHint, as
   if (email.length < 3 || email.length > 120 || !EMAIL_REGEX.test(email)) {
     throw new Error('Enter a valid Google email address.');
   }
-  if (assignedRole === 'SUPER_ADMIN') {
-    throw new Error('Super Admin role cannot be assigned via invite.');
-  }
+  const normalizedRole = normalizeUserRole(assignedRole);
   assertCleanText(rawNameHint);
   const nRes = validateBoundedText(rawNameHint, 'Name', 2, 60);
   if (!nRes.valid) throw new Error(nRes.reason);
@@ -1214,7 +1302,7 @@ export async function inviteAccountByEmail(db, auth, { rawEmail, rawNameHint, as
   await setDoc(doc(db, 'role_invites', email), {
     email,
     displayNameHint: nRes.value,
-    assignedRole,
+    assignedRole: normalizedRole,
     invitedBy: uid,
     invitedByLabel: inviterLabel,
     status: 'PENDING',
@@ -1226,9 +1314,9 @@ export async function inviteAccountByEmail(db, auth, { rawEmail, rawNameHint, as
     db,
     auth,
     'ACCOUNT_INVITED',
-    'INFO',
+    normalizedRole === 'SUPER_ADMIN' ? 'HIGH' : 'INFO',
     `role_invites/${email}`,
-    `Pre-registered ${assignedRole} account invite.`
+    `Pre-registered ${normalizedRole} account invite.`
   );
 }
 
@@ -1237,9 +1325,7 @@ export async function revokeInvite(db, auth, emailKey) {
   await logAuditEvent(db, auth, 'ROLE_CHANGED', 'INFO', `role_invites/${emailKey}`, 'Removed account invite.');
 }
 
-export async function promoteUserToAdmin(db, auth, targetUser) {
-  const uid = auth.currentUser?.uid;
-  const cleanUid = targetUser.userId;
+async function resolveUserEmailForPrivilege(db, cleanUid) {
   let piiEmail = `${cleanUid.slice(0, 12)}@unicore.edu`;
   try {
     const piiSnap = await getDoc(doc(db, 'users', cleanUid, 'private', 'pii'));
@@ -1248,6 +1334,13 @@ export async function promoteUserToAdmin(db, auth, targetUser) {
   } catch {
     // Fallback used
   }
+  return piiEmail;
+}
+
+export async function promoteUserToAdmin(db, auth, targetUser) {
+  const uid = auth.currentUser?.uid;
+  const cleanUid = targetUser.userId;
+  const piiEmail = await resolveUserEmailForPrivilege(db, cleanUid);
 
   await setDoc(doc(db, 'admins', cleanUid), {
     userId: cleanUid,
@@ -1275,6 +1368,75 @@ export async function promoteUserToAdmin(db, auth, targetUser) {
     body: 'Your UniCore account has been promoted to Admin.',
     category: 'ROLE',
     targetUid: cleanUid
+  });
+}
+
+export async function promoteUserToSuperAdmin(db, auth, targetUser) {
+  const cleanUid = targetUser.userId;
+  const piiEmail = await resolveUserEmailForPrivilege(db, cleanUid);
+
+  await setDoc(doc(db, 'super_admins', cleanUid), {
+    userId: cleanUid,
+    email: piiEmail,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+
+  await deleteDoc(doc(db, 'admins', cleanUid)).catch(() => {});
+
+  await updateDoc(doc(db, 'users', cleanUid), {
+    role: 'SUPER_ADMIN',
+    updatedAt: serverTimestamp()
+  });
+
+  await logAuditEvent(
+    db,
+    auth,
+    'ROLE_CHANGED',
+    'CRITICAL',
+    `super_admins/${cleanUid}`,
+    `Super Admin promoted ${targetUser.displayName} to SUPER_ADMIN.`
+  );
+  await sendNotification(db, auth, {
+    title: 'Super Admin Access Granted',
+    body: 'Your UniCore account has been promoted to Super Admin.',
+    category: 'ROLE',
+    targetUid: cleanUid
+  });
+}
+
+export async function demoteSuperAdminToAdmin(db, auth, targetUid) {
+  const uid = auth.currentUser?.uid;
+  if (targetUid === uid) {
+    throw new Error('You cannot demote your own Super Admin account.');
+  }
+  const piiEmail = await resolveUserEmailForPrivilege(db, targetUid);
+  await deleteDoc(doc(db, 'super_admins', targetUid));
+  await setDoc(doc(db, 'admins', targetUid), {
+    userId: targetUid,
+    email: piiEmail,
+    grantedBy: uid,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+  await updateDoc(doc(db, 'users', targetUid), {
+    role: 'ADMIN',
+    updatedAt: serverTimestamp()
+  }).catch(() => {});
+
+  await logAuditEvent(
+    db,
+    auth,
+    'ROLE_CHANGED',
+    'HIGH',
+    `super_admins/${targetUid}`,
+    `Super Admin changed role of ${targetUid} to ADMIN.`
+  );
+  await sendNotification(db, auth, {
+    title: 'Role Updated',
+    body: 'Your UniCore role has been updated to Admin.',
+    category: 'ROLE',
+    targetUid
   });
 }
 
@@ -1509,16 +1671,25 @@ export async function deleteChatMessage(db, auth, roomId, messageId) {
   );
 }
 
-export async function updateSystemSettingsAsSuperAdmin(db, auth, { dailyAiLimit, dailyWriteLimit, aiEnabled, zeroCostLockActive }) {
+export async function updateSystemSettingsAsSuperAdmin(
+  db,
+  auth,
+  { dailyAiLimit, dailyWriteLimit, aiEnabled, zeroCostLockActive, tutorialVideoUrl = '', tutorialVideoTitle = '' }
+) {
   const uid = auth.currentUser?.uid;
   const aiCap = Math.max(1, Math.min(100, Number(dailyAiLimit) || 20));
   const writeCap = Math.max(10, Math.min(500, Number(dailyWriteLimit) || 100));
+  const tutUrlCheck = validateOptionalHttpsUrl(tutorialVideoUrl);
+  if (!tutUrlCheck.valid) throw new Error(tutUrlCheck.reason);
+  const cleanTitle = sanitizeText(tutorialVideoTitle || '').slice(0, 120);
 
   await updateDoc(doc(db, 'system_settings', 'global'), {
     dailyAiLimitPerUser: aiCap,
     dailyWriteLimitPerUser: writeCap,
     aiEnabled: Boolean(aiEnabled),
     zeroCostLockActive: Boolean(zeroCostLockActive),
+    tutorialVideoUrl: tutUrlCheck.value ? tutUrlCheck.value : deleteField(),
+    tutorialVideoTitle: cleanTitle ? cleanTitle : deleteField(),
     updatedBy: uid,
     updatedAt: serverTimestamp()
   });
@@ -1529,6 +1700,506 @@ export async function updateSystemSettingsAsSuperAdmin(db, auth, { dailyAiLimit,
     'SETTINGS_CHANGED',
     'HIGH',
     'system_settings/global',
-    `Super Admin updated zero-cost settings: aiLimit=${aiCap}, aiEnabled=${Boolean(aiEnabled)}, lock=${Boolean(zeroCostLockActive)}`
+    `Super Admin updated settings: aiLimit=${aiCap}, aiEnabled=${Boolean(aiEnabled)}, lock=${Boolean(zeroCostLockActive)}`
   );
+}
+
+// --- Academic Placement, Favorites & Assignments Progress ---
+
+export async function saveUserAcademicPlacement(
+  db,
+  auth,
+  { departmentId, departmentName, academicYear, sectionName }
+) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(`${departmentName || ''} ${academicYear || ''} ${sectionName || ''}`);
+  const yRes = validateBoundedText(academicYear, 'Academic Year', 1, 40);
+  if (!yRes.valid) throw new Error(yRes.reason);
+  const sRes = validateBoundedText(sectionName, 'Section', 1, 40);
+  if (!sRes.valid) throw new Error(sRes.reason);
+  const cleanDeptName = sanitizeText(departmentName || 'General').slice(0, 80) || 'General';
+
+  await updateDoc(doc(db, 'users', uid), {
+    departmentId: departmentId && isValidId(departmentId) ? departmentId : deleteField(),
+    departmentName: cleanDeptName,
+    academicYear: yRes.value,
+    sectionName: sRes.value,
+    placementCompleted: true,
+    updatedAt: serverTimestamp()
+  });
+}
+
+export async function toggleFavoriteCourse(db, auth, courseId, currentFavoriteIds = []) {
+  const uid = auth.currentUser?.uid;
+  if (!uid || !courseId) return;
+  const set = new Set(Array.isArray(currentFavoriteIds) ? currentFavoriteIds : []);
+  if (set.has(courseId)) set.delete(courseId);
+  else set.add(courseId);
+  const next = Array.from(set).filter((id) => isValidId(id)).slice(0, 100);
+  await updateDoc(doc(db, 'users', uid), {
+    favoriteCourseIds: next,
+    updatedAt: serverTimestamp()
+  });
+}
+
+export async function toggleAssignmentCompleted(db, auth, assignmentId, currentCompletedIds = []) {
+  const uid = auth.currentUser?.uid;
+  if (!uid || !assignmentId) return;
+  const set = new Set(Array.isArray(currentCompletedIds) ? currentCompletedIds : []);
+  if (set.has(assignmentId)) set.delete(assignmentId);
+  else set.add(assignmentId);
+  const next = Array.from(set).filter((id) => isValidId(id)).slice(0, 200);
+  await updateDoc(doc(db, 'users', uid), {
+    completedAssignmentIds: next,
+    updatedAt: serverTimestamp()
+  });
+}
+
+// --- Assignments & Google Classroom ("اللي عليا") ---
+
+export function subscribeAssignments(db, uid, isAdmin, onData, onError) {
+  // CRITICAL: Student queries must NEVER add where('published', '==', true) because personal CLASSROOM docs check ownerUid == uid
+  const q = isAdmin
+    ? collection(db, 'assignments')
+    : query(collection(db, 'assignments'), where('ownerUid', 'in', ['ALL', uid]));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .filter((a) => isAdmin || a.published !== false || a.ownerUid === uid)
+        .sort((a, b) => (Number(a.dueAtMillis) || 0) - (Number(b.dueAtMillis) || 0));
+      onData(list);
+    },
+    onError
+  );
+}
+
+export async function createAssignment(
+  db,
+  auth,
+  {
+    title,
+    description,
+    courseTitle = '',
+    departmentId = null,
+    departmentName = null,
+    academicYear = null,
+    sectionName = null,
+    dueAtMillis,
+    classroomLink = '',
+    videoUrl = '',
+    sourceType = 'APP',
+    ownerUid = 'ALL'
+  }
+) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(`${title} ${description} ${courseTitle}`);
+  const tRes = validateBoundedText(title, 'Assignment title', 2, 120);
+  if (!tRes.valid) throw new Error(tRes.reason);
+  const dRes = validateBoundedText(description || title, 'Assignment details', 1, 600);
+  if (!dRes.valid) throw new Error(dRes.reason);
+  const cRes = validateOptionalHttpsUrl(classroomLink);
+  if (!cRes.valid) throw new Error(cRes.reason);
+  const vRes = validateOptionalHttpsUrl(videoUrl);
+  if (!vRes.valid) throw new Error(vRes.reason);
+
+  const dueMs = Number(dueAtMillis) || Date.now() + 2 * 24 * 60 * 60 * 1000;
+  let senderName = sanitizeText(auth.currentUser?.displayName || 'UniCore User').slice(0, 60);
+  if (senderName.length < 2) senderName = 'User';
+
+  const docRef = doc(collection(db, 'assignments'));
+  const payload = {
+    title: tRes.value,
+    description: dRes.value,
+    dueAtMillis: dueMs,
+    sourceType: sourceType === 'CLASSROOM' ? 'CLASSROOM' : 'APP',
+    ownerUid: ownerUid === 'ALL' ? 'ALL' : uid,
+    published: true,
+    createdBy: uid,
+    createdByName: senderName,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  };
+
+  if (courseTitle && sanitizeText(courseTitle)) payload.courseTitle = sanitizeText(courseTitle).slice(0, 100);
+  if (cRes.value) payload.classroomLink = cRes.value;
+  if (vRes.value) payload.videoUrl = vRes.value;
+  if (departmentId && isValidId(departmentId)) payload.departmentId = departmentId;
+  if (departmentName && sanitizeText(departmentName).length >= 2) {
+    payload.departmentName = sanitizeText(departmentName).slice(0, 80);
+  }
+  if (academicYear && sanitizeText(academicYear)) {
+    payload.academicYear = sanitizeText(academicYear).slice(0, 40);
+  }
+  if (sectionName && sanitizeText(sectionName)) {
+    payload.sectionName = sanitizeText(sectionName).slice(0, 40);
+  }
+
+  await setDoc(docRef, payload);
+
+  if (payload.ownerUid === 'ALL') {
+    await sendNotification(db, auth, {
+      title: `أسينمنت جديد: ${tRes.value}`,
+      body: `${courseTitle ? `${courseTitle} • ` : ''}الموعد: ${new Date(dueMs).toLocaleString()}`,
+      category: 'ASSIGNMENT',
+      targetUid: 'ALL'
+    });
+  }
+  return docRef.id;
+}
+
+export async function importClassroomAssignments(db, auth, items, userProfile) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated.');
+  let count = 0;
+
+  for (const item of items || []) {
+    const safeExt = String(item.externalId || `${Date.now()}_${count}`)
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .slice(0, 80);
+    const docId = `${uid.slice(0, 24)}_${safeExt}`.slice(0, 120);
+    const cleanTitle = sanitizeText(item.title || 'Classroom Task').slice(0, 120) || 'Classroom Task';
+    const cleanDesc = sanitizeText(item.description || cleanTitle).slice(0, 600) || cleanTitle;
+    const cleanCourse = sanitizeText(item.courseTitle || 'Google Classroom').slice(0, 100);
+    const cRes = validateOptionalHttpsUrl(item.classroomLink || '');
+
+    const payload = {
+      title: cleanTitle,
+      description: cleanDesc,
+      courseTitle: cleanCourse,
+      dueAtMillis: Number(item.dueAtMillis) || Date.now() + 7 * 24 * 60 * 60 * 1000,
+      sourceType: 'CLASSROOM',
+      ownerUid: uid,
+      published: true,
+      createdBy: uid,
+      createdByName: sanitizeText(auth.currentUser?.displayName || 'Student').slice(0, 60) || 'Student',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    };
+    if (cRes.valid && cRes.value) payload.classroomLink = cRes.value;
+    if (userProfile?.departmentId && isValidId(userProfile.departmentId)) {
+      payload.departmentId = userProfile.departmentId;
+    }
+    if (userProfile?.departmentName) payload.departmentName = sanitizeText(userProfile.departmentName).slice(0, 80);
+    if (userProfile?.academicYear) payload.academicYear = sanitizeText(userProfile.academicYear).slice(0, 40);
+    if (userProfile?.sectionName) payload.sectionName = sanitizeText(userProfile.sectionName).slice(0, 40);
+
+    await setDoc(doc(db, 'assignments', docId), payload, { merge: true });
+    count += 1;
+  }
+
+  await updateDoc(doc(db, 'users', uid), {
+    classroomConnected: true,
+    updatedAt: serverTimestamp()
+  }).catch(() => {});
+
+  return count;
+}
+
+export async function deleteAssignment(db, assignmentId) {
+  await deleteDoc(doc(db, 'assignments', assignmentId));
+}
+
+// --- Per-Section Weekly Schedule ---
+
+export function subscribeScheduleItems(db, isAdmin, onData, onError) {
+  const q = isAdmin
+    ? collection(db, 'schedule_items')
+    : query(collection(db, 'schedule_items'), where('published', '==', true));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => (Number(a.dayOfWeek) || 1) - (Number(b.dayOfWeek) || 1));
+      onData(list);
+    },
+    onError
+  );
+}
+
+export async function createScheduleItem(
+  db,
+  auth,
+  {
+    title,
+    itemType = 'LECTURE',
+    dayOfWeek = 1,
+    startTimeText,
+    endTimeText = '',
+    locationOrMode,
+    instructorName = '',
+    departmentId = null,
+    departmentName = null,
+    academicYear = null,
+    sectionName = null,
+    videoUrl = ''
+  }
+) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(`${title} ${locationOrMode} ${instructorName}`);
+  const tRes = validateBoundedText(title, 'Title', 2, 100);
+  if (!tRes.valid) throw new Error(tRes.reason);
+  const sRes = validateBoundedText(startTimeText, 'Start time', 1, 30);
+  if (!sRes.valid) throw new Error(sRes.reason);
+  const locRes = validateBoundedText(locationOrMode, 'Location / Hall', 1, 80);
+  if (!locRes.valid) throw new Error(locRes.reason);
+  const vRes = validateOptionalHttpsUrl(videoUrl);
+  if (!vRes.valid) throw new Error(vRes.reason);
+
+  const payload = {
+    title: tRes.value,
+    itemType: ['LECTURE', 'SECTION', 'ASSIGNMENT', 'EXAM'].includes(itemType) ? itemType : 'LECTURE',
+    dayOfWeek: Math.max(1, Math.min(7, Number(dayOfWeek) || 1)),
+    startTimeText: sRes.value,
+    endTimeText: sanitizeText(endTimeText || '').slice(0, 30),
+    locationOrMode: locRes.value,
+    published: true,
+    createdBy: uid,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  };
+  if (instructorName && sanitizeText(instructorName)) {
+    payload.instructorName = sanitizeText(instructorName).slice(0, 60);
+  }
+  if (departmentId && isValidId(departmentId)) payload.departmentId = departmentId;
+  if (departmentName && sanitizeText(departmentName).length >= 2) {
+    payload.departmentName = sanitizeText(departmentName).slice(0, 80);
+  }
+  if (academicYear && sanitizeText(academicYear)) {
+    payload.academicYear = sanitizeText(academicYear).slice(0, 40);
+  }
+  if (sectionName && sanitizeText(sectionName)) {
+    payload.sectionName = sanitizeText(sectionName).slice(0, 40);
+  }
+  if (vRes.value) payload.videoUrl = vRes.value;
+
+  const docRef = doc(collection(db, 'schedule_items'));
+  await setDoc(docRef, payload);
+}
+
+export async function deleteScheduleItem(db, id) {
+  await deleteDoc(doc(db, 'schedule_items', id));
+}
+
+// --- Live Zoom Sessions ---
+
+export function subscribeZoomSessions(db, isAdmin, onData, onError) {
+  const q = isAdmin
+    ? collection(db, 'zoom_sessions')
+    : query(collection(db, 'zoom_sessions'), where('published', '==', true));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => (Number(a.scheduledAtMillis) || 0) - (Number(b.scheduledAtMillis) || 0));
+      onData(list);
+    },
+    onError
+  );
+}
+
+export async function createZoomSession(
+  db,
+  auth,
+  {
+    title,
+    topic = '',
+    zoomUrl,
+    scheduledAtMillis,
+    durationMinutes = 60,
+    departmentId = null,
+    departmentName = null,
+    academicYear = null,
+    sectionName = null
+  }
+) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(`${title} ${topic}`);
+  const tRes = validateBoundedText(title, 'Session title', 2, 120);
+  if (!tRes.valid) throw new Error(tRes.reason);
+  const urlRes = validateOptionalHttpsUrl(zoomUrl);
+  if (!urlRes.valid || !urlRes.value) throw new Error('Enter a valid HTTPS Zoom link.');
+
+  const whenMs = Number(scheduledAtMillis) || Date.now();
+  const dur = Math.max(10, Math.min(360, Number(durationMinutes) || 60));
+  let hostName = sanitizeText(auth.currentUser?.displayName || 'Instructor').slice(0, 60);
+  if (hostName.length < 2) hostName = 'Host';
+
+  const payload = {
+    title: tRes.value,
+    zoomUrl: urlRes.value,
+    scheduledAtMillis: whenMs,
+    durationMinutes: dur,
+    hostName,
+    published: true,
+    createdBy: uid,
+    createdByName: hostName,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  };
+  if (topic && sanitizeText(topic)) payload.topic = sanitizeText(topic).slice(0, 300);
+  if (departmentId && isValidId(departmentId)) payload.departmentId = departmentId;
+  if (departmentName && sanitizeText(departmentName).length >= 2) {
+    payload.departmentName = sanitizeText(departmentName).slice(0, 80);
+  }
+  if (academicYear && sanitizeText(academicYear)) {
+    payload.academicYear = sanitizeText(academicYear).slice(0, 40);
+  }
+  if (sectionName && sanitizeText(sectionName)) {
+    payload.sectionName = sanitizeText(sectionName).slice(0, 40);
+  }
+
+  const docRef = doc(collection(db, 'zoom_sessions'));
+  await setDoc(docRef, payload);
+
+  await sendNotification(db, auth, {
+    title: `محاضرة Zoom: ${tRes.value}`,
+    body: `${hostName} • ${new Date(whenMs).toLocaleString()}`,
+    category: 'ZOOM',
+    targetUid: 'ALL'
+  });
+}
+
+export async function deleteZoomSession(db, id) {
+  await deleteDoc(doc(db, 'zoom_sessions', id));
+}
+
+// --- Instructions for Everyone ("تعليمات للكل") ---
+
+export function subscribeInstructions(db, isAdmin, onData, onError) {
+  const q = isAdmin
+    ? collection(db, 'instructions')
+    : query(collection(db, 'instructions'), where('published', '==', true));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const rank = { PINNED: 0, IMPORTANT: 1, NORMAL: 2 };
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort(
+          (a, b) =>
+            (rank[a.priority] ?? 2) - (rank[b.priority] ?? 2) ||
+            timestampSec(b.createdAt) - timestampSec(a.createdAt)
+        );
+      onData(list);
+    },
+    onError
+  );
+}
+
+export async function createInstruction(
+  db,
+  auth,
+  { title, body, priority = 'NORMAL', departmentId = null, departmentName = null, academicYear = null, sectionName = null }
+) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(`${title} ${body}`);
+  const tRes = validateBoundedText(title, 'Instruction title', 2, 120);
+  if (!tRes.valid) throw new Error(tRes.reason);
+  const bRes = validateBoundedText(body, 'Instruction message', 2, 1000);
+  if (!bRes.valid) throw new Error(bRes.reason);
+
+  let createdByName = sanitizeText(auth.currentUser?.displayName || 'Admin').slice(0, 60);
+  if (createdByName.length < 2) createdByName = 'Admin';
+
+  const payload = {
+    title: tRes.value,
+    body: bRes.value,
+    priority: ['NORMAL', 'IMPORTANT', 'PINNED'].includes(priority) ? priority : 'NORMAL',
+    published: true,
+    createdBy: uid,
+    createdByName,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  };
+  if (departmentId && isValidId(departmentId)) payload.departmentId = departmentId;
+  if (departmentName && sanitizeText(departmentName).length >= 2) {
+    payload.departmentName = sanitizeText(departmentName).slice(0, 80);
+  }
+  if (academicYear && sanitizeText(academicYear)) {
+    payload.academicYear = sanitizeText(academicYear).slice(0, 40);
+  }
+  if (sectionName && sanitizeText(sectionName)) {
+    payload.sectionName = sanitizeText(sectionName).slice(0, 40);
+  }
+
+  await setDoc(doc(collection(db, 'instructions')), payload);
+  await sendNotification(db, auth, {
+    title: tRes.value,
+    body: bRes.value.slice(0, 140),
+    category: 'ANNOUNCEMENT',
+    targetUid: 'ALL'
+  });
+}
+
+export async function deleteInstruction(db, id) {
+  await deleteDoc(doc(db, 'instructions', id));
+}
+
+// --- Section Messages ("مسدجات السكشن") ---
+
+export function subscribeSectionMessages(db, onData, onError) {
+  const q = query(collection(db, 'section_messages'), orderBy('createdAt', 'desc'), limit(120));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned)));
+      onData(list);
+    },
+    onError
+  );
+}
+
+export async function sendSectionMessage(
+  db,
+  auth,
+  { departmentId = null, departmentName = 'General', academicYear, sectionName, userRole, text, isPinned = false, videoUrl = '' }
+) {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Not authenticated.');
+  assertCleanText(text);
+  const tRes = validateBoundedText(text, 'Section message', 1, 800);
+  if (!tRes.valid) throw new Error(tRes.reason);
+  const yRes = validateBoundedText(academicYear, 'Academic Year', 1, 40);
+  if (!yRes.valid) throw new Error(yRes.reason);
+  const sRes = validateBoundedText(sectionName, 'Section', 1, 40);
+  if (!sRes.valid) throw new Error(sRes.reason);
+  const vRes = validateOptionalHttpsUrl(videoUrl);
+  if (!vRes.valid) throw new Error(vRes.reason);
+
+  let senderName = sanitizeText(auth.currentUser?.displayName || 'UniCore User').slice(0, 60);
+  if (senderName.length < 2) senderName = 'User';
+  const role = normalizeUserRole(userRole);
+  const isStaff = role !== 'STUDENT';
+
+  const payload = {
+    departmentName: sanitizeText(departmentName || 'General').slice(0, 80) || 'General',
+    academicYear: yRes.value,
+    sectionName: sRes.value,
+    senderUid: uid,
+    senderName,
+    senderRole: role,
+    messageType: isStaff ? 'NOTICE' : 'MESSAGE',
+    isPinned: isStaff ? Boolean(isPinned) : false,
+    text: tRes.value,
+    createdAt: serverTimestamp()
+  };
+  if (departmentId && isValidId(departmentId)) payload.departmentId = departmentId;
+  if (vRes.value) payload.videoUrl = vRes.value;
+
+  await setDoc(doc(collection(db, 'section_messages')), payload);
+}
+
+export async function deleteSectionMessage(db, id) {
+  await deleteDoc(doc(db, 'section_messages', id));
 }

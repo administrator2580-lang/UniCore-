@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.filled.Assignment
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Notifications
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Quiz
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -277,6 +279,8 @@ fun NotificationsSheet(
                                                     NotificationCategory.ROLE -> Icons.Default.AdminPanelSettings
                                                     NotificationCategory.SECURITY -> Icons.Default.Security
                                                     NotificationCategory.ANNOUNCEMENT -> Icons.Default.Campaign
+                                                    NotificationCategory.ASSIGNMENT -> Icons.Default.Assignment
+                                                    NotificationCategory.ZOOM -> Icons.Default.Videocam
                                                 },
                                                 contentDescription = cat.name,
                                                 tint = MaterialTheme.colorScheme.onPrimaryContainer,

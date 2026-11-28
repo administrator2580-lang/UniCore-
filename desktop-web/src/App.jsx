@@ -3,9 +3,12 @@ import { onAuthStateChanged } from 'firebase/auth';
 import {
   Ban,
   Bell,
+  CalendarDays,
   ClipboardCheck,
+  ClipboardList,
   Clock,
   FolderKanban,
+  GraduationCap,
   LogOut,
   MessageSquare,
   Moon,
@@ -19,23 +22,33 @@ import { getFirebaseClients, signOutUnified } from './firebase/config';
 import {
   ensureUserSessionProfile,
   getCachedUserRole,
+  matchesStudentScope,
+  normalizeUserRole,
+  subscribeAssignments,
   subscribeAuditLogs,
   subscribeCourses,
   subscribeDepartments,
   subscribeDriveFolders,
+  subscribeInstructions,
   subscribeNotifications,
   subscribeQuizAttempts,
   subscribeQuizzes,
   subscribeRoleInvites,
+  subscribeScheduleItems,
   subscribeSupportMessages,
   subscribeSystemSettings,
   subscribeUserProfile,
   subscribeUsersDirectory,
-  subscribeVerifiedFiles
+  subscribeVerifiedFiles,
+  subscribeZoomSessions
 } from './data/firestoreService';
 import { stringsFor } from './i18n/strings';
+import { playUniCoreChime } from './utils/soundPlayer';
 import AuthView from './components/AuthView';
 import CoursesView from './components/CoursesView';
+import AssignmentsView from './components/AssignmentsView';
+import CampusHubView from './components/CampusHubView';
+import PlacementModal from './components/PlacementModal';
 import QuizzesView from './components/QuizzesView';
 import AiTutorView from './components/AiTutorView';
 import FilesVaultView from './components/FilesVaultView';
@@ -54,7 +67,9 @@ function loadPrefs() {
         language: parsed.language === 'ENGLISH' ? 'ENGLISH' : 'ARABIC',
         themeMode: ['SYSTEM', 'DARK', 'LIGHT'].includes(parsed.themeMode) ? parsed.themeMode : 'SYSTEM',
         desktopNotificationsEnabled: parsed.desktopNotificationsEnabled !== false,
-        readNotificationIds: Array.isArray(parsed.readNotificationIds) ? parsed.readNotificationIds : []
+        soundEnabled: parsed.soundEnabled !== false,
+        readNotificationIds: Array.isArray(parsed.readNotificationIds) ? parsed.readNotificationIds : [],
+        reminded24hIds: Array.isArray(parsed.reminded24hIds) ? parsed.reminded24hIds : []
       };
     }
   } catch {
@@ -64,7 +79,9 @@ function loadPrefs() {
     language: 'ARABIC',
     themeMode: 'SYSTEM',
     desktopNotificationsEnabled: true,
-    readNotificationIds: []
+    soundEnabled: true,
+    readNotificationIds: [],
+    reminded24hIds: []
   };
 }
 
@@ -187,8 +204,9 @@ function AuthenticatedShell({
 
   const [tab, setTab] = useState('COURSES');
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showPlacementModal, setShowPlacementModal] = useState(false);
 
-  const [userRole, setUserRole] = useState(() => getCachedUserRole(uid) || 'STUDENT');
+  const [userRole, setUserRole] = useState(() => normalizeUserRole(getCachedUserRole(uid) || 'STUDENT'));
   const [userProfile, setUserProfile] = useState(null);
   const [systemSettings, setSystemSettings] = useState({
     dailyAiLimitPerUser: 20,
@@ -198,6 +216,10 @@ function AuthenticatedShell({
   });
   const [courses, setCourses] = useState([]);
   const [departments, setDepartments] = useState([]);
+  const [assignments, setAssignments] = useState([]);
+  const [scheduleItems, setScheduleItems] = useState([]);
+  const [zoomSessions, setZoomSessions] = useState([]);
+  const [instructions, setInstructions] = useState([]);
   const [driveFolders, setDriveFolders] = useState([]);
   const [driveFoldersLoaded, setDriveFoldersLoaded] = useState(false);
   const [driveFiles, setDriveFiles] = useState(() => {
@@ -260,8 +282,8 @@ function AuthenticatedShell({
       uid,
       (profile) => {
         setUserProfile(profile);
-        if (profile?.role && ['STUDENT', 'ADMIN', 'SUPER_ADMIN'].includes(profile.role)) {
-          setUserRole(profile.role);
+        if (profile?.role) {
+          setUserRole(normalizeUserRole(profile.role));
         }
       },
       (err) => onShowToast(err.message)
@@ -290,6 +312,10 @@ function AuthenticatedShell({
     const unsubs = [
       subscribeCourses(db, isAdmin, setCourses, (e) => onShowToast(e.message)),
       subscribeDepartments(db, setDepartments, (e) => onShowToast(e.message)),
+      subscribeAssignments(db, uid, isAdmin, setAssignments, (e) => onShowToast(e.message)),
+      subscribeScheduleItems(db, isAdmin, setScheduleItems, (e) => onShowToast(e.message)),
+      subscribeZoomSessions(db, isAdmin, setZoomSessions, (e) => onShowToast(e.message)),
+      subscribeInstructions(db, isAdmin, setInstructions, (e) => onShowToast(e.message)),
       subscribeDriveFolders(
         db,
         (folders) => {
@@ -449,7 +475,7 @@ function AuthenticatedShell({
     }
   };
 
-  // Desktop Notification toast on newly arriving notifications
+  // Desktop Notification + Custom UniCore Sound on newly arriving notifications
   useEffect(() => {
     if (!notifications.length) return;
     const state = seenNotifsRef.current;
@@ -460,15 +486,77 @@ function AuthenticatedShell({
     }
     const fresh = notifications.filter((n) => !state.ids.has(n.id));
     fresh.forEach((n) => state.ids.add(n.id));
-    if (prefs.desktopNotificationsEnabled && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      fresh
-        .filter((n) => !prefs.readNotificationIds.includes(n.id) && n.senderUid !== uid)
-        .slice(0, 3)
-        .forEach((n) => {
-          new Notification(n.title, { body: n.body, icon: '/assets/icon.png' });
-        });
+    const actionable = fresh.filter((n) => !prefs.readNotificationIds.includes(n.id) && n.senderUid !== uid);
+    if (actionable.length > 0 && prefs.soundEnabled) {
+      playUniCoreChime();
     }
-  }, [notifications, prefs.desktopNotificationsEnabled, prefs.readNotificationIds, uid]);
+    if (
+      prefs.desktopNotificationsEnabled &&
+      typeof Notification !== 'undefined' &&
+      Notification.permission === 'granted'
+    ) {
+      actionable.slice(0, 3).forEach((n) => {
+        new Notification(n.title, { body: n.body, icon: '/assets/icon.png' });
+      });
+    }
+  }, [notifications, prefs.desktopNotificationsEnabled, prefs.soundEnabled, prefs.readNotificationIds, uid]);
+
+  // 24h-Before-Deadline Assignment Reminder Scheduler (checks every 60s)
+  useEffect(() => {
+    if (isBlockedNonSuper || !assignments.length) return undefined;
+    const completedIds = Array.isArray(userProfile?.completedAssignmentIds)
+      ? userProfile.completedAssignmentIds
+      : [];
+    const checkDueReminders = () => {
+      const now = Date.now();
+      const soonTasks = assignments.filter((a) => {
+        if (completedIds.includes(a.id)) return false;
+        if (prefs.reminded24hIds.includes(a.id)) return false;
+        if (!matchesStudentScope(userProfile, userRole, a)) return false;
+        const dueMs = Number(a.dueAtMillis) || 0;
+        return dueMs > now && dueMs - now <= 24 * 60 * 60 * 1000;
+      });
+      if (soonTasks.length === 0) return;
+
+      const newlyReminded = soonTasks.map((t) => t.id);
+      setPrefs((p) => ({
+        ...p,
+        reminded24hIds: Array.from(new Set([...(p.reminded24hIds || []), ...newlyReminded]))
+      }));
+
+      if (prefs.soundEnabled) {
+        playUniCoreChime();
+      }
+
+      soonTasks.slice(0, 2).forEach((t) => {
+        const msg = `${strings.dueSoonBadge}: ${t.title}`;
+        onShowToast(msg);
+        if (
+          prefs.desktopNotificationsEnabled &&
+          typeof Notification !== 'undefined' &&
+          Notification.permission === 'granted'
+        ) {
+          new Notification(t.title, {
+            body: `${strings.dueSoonBadge} • ${new Date(t.dueAtMillis).toLocaleString()}`,
+            icon: '/assets/icon.png'
+          });
+        }
+      });
+    };
+
+    checkDueReminders();
+    const id = setInterval(checkDueReminders, 60_000);
+    return () => clearInterval(id);
+  }, [
+    isBlockedNonSuper,
+    assignments,
+    userProfile,
+    userRole,
+    prefs.reminded24hIds,
+    prefs.soundEnabled,
+    prefs.desktopNotificationsEnabled,
+    strings.dueSoonBadge
+  ]);
 
   if (isBlockedNonSuper) {
     return (
@@ -515,8 +603,15 @@ function AuthenticatedShell({
         ? strings.roleAdmin
         : strings.roleStudent;
 
+  const needsMandatoryPlacement =
+    Boolean(userProfile) &&
+    userRole === 'STUDENT' &&
+    (!userProfile.placementCompleted || !userProfile.academicYear || !userProfile.sectionName);
+
   const navItems = [
     { id: 'COURSES', label: strings.navCourses, icon: School },
+    { id: 'DUE', label: strings.navDue, icon: ClipboardList },
+    { id: 'CAMPUS', label: strings.navCampus, icon: CalendarDays },
     { id: 'QUIZZES', label: strings.navQuizzes, icon: ClipboardCheck },
     { id: 'CHAT', label: strings.navChat, icon: MessageSquare },
     { id: 'AI_TUTOR', label: strings.navTutor, icon: Sparkles },
@@ -532,6 +627,19 @@ function AuthenticatedShell({
           <span className="topbar-title">
             {strings.appName} • {roleLabel}
           </span>
+          {userProfile?.academicYear || userProfile?.sectionName ? (
+            <button
+              type="button"
+              className="m3-chip"
+              style={{ minHeight: '32px', padding: '4px 10px', fontSize: '0.78rem' }}
+              onClick={() => setShowPlacementModal(true)}
+            >
+              <GraduationCap size={14} />
+              <span>
+                {[userProfile.academicYear, userProfile.sectionName].filter(Boolean).join(' • ')}
+              </span>
+            </button>
+          ) : null}
         </div>
 
         <div className="topbar-actions">
@@ -597,6 +705,7 @@ function AuthenticatedShell({
                 db={db}
                 auth={auth}
                 userRole={userRole}
+                userProfile={userProfile}
                 courses={courses}
                 departments={departments}
                 driveFolders={driveFolders}
@@ -610,6 +719,36 @@ function AuthenticatedShell({
                 onRemoveDriveOffline={handleRemoveDriveOffline}
                 onDownloadAllOffline={handleDownloadAllOffline}
                 onMarkDriveDownloaded={markDriveDownloaded}
+                onShowToast={onShowToast}
+              />
+            ) : null}
+
+            {tab === 'DUE' ? (
+              <AssignmentsView
+                strings={strings}
+                db={db}
+                auth={auth}
+                userRole={userRole}
+                userProfile={userProfile}
+                departments={departments}
+                assignments={assignments}
+                onShowToast={onShowToast}
+              />
+            ) : null}
+
+            {tab === 'CAMPUS' ? (
+              <CampusHubView
+                strings={strings}
+                language={prefs.language}
+                db={db}
+                auth={auth}
+                userRole={userRole}
+                userProfile={userProfile}
+                systemSettings={systemSettings}
+                departments={departments}
+                scheduleItems={scheduleItems}
+                zoomSessions={zoomSessions}
+                instructions={instructions}
                 onShowToast={onShowToast}
               />
             ) : null}
@@ -634,6 +773,7 @@ function AuthenticatedShell({
                 auth={auth}
                 currentUserId={uid}
                 userRole={userRole}
+                userProfile={userProfile}
                 departments={departments}
                 onShowToast={onShowToast}
               />
@@ -675,11 +815,15 @@ function AuthenticatedShell({
                 language={prefs.language}
                 themeMode={prefs.themeMode}
                 desktopNotificationsEnabled={prefs.desktopNotificationsEnabled}
+                soundEnabled={prefs.soundEnabled}
                 onSetLanguage={(language) => setPrefs((p) => ({ ...p, language }))}
                 onSetThemeMode={(themeMode) => setPrefs((p) => ({ ...p, themeMode }))}
                 onSetDesktopNotifications={(desktopNotificationsEnabled) =>
                   setPrefs((p) => ({ ...p, desktopNotificationsEnabled }))
                 }
+                onSetSoundEnabled={(soundEnabled) => setPrefs((p) => ({ ...p, soundEnabled }))}
+                onTestSound={() => playUniCoreChime()}
+                onOpenPlacementModal={() => setShowPlacementModal(true)}
                 usersDirectory={usersDirectory}
                 roleInvites={roleInvites}
                 supportMessages={supportMessages}
@@ -709,6 +853,19 @@ function AuthenticatedShell({
           );
         })}
       </nav>
+
+      {(needsMandatoryPlacement || showPlacementModal) ? (
+        <PlacementModal
+          strings={strings}
+          db={db}
+          auth={auth}
+          departments={departments}
+          userProfile={userProfile}
+          canDismiss={!needsMandatoryPlacement}
+          onClose={() => setShowPlacementModal(false)}
+          onShowToast={onShowToast}
+        />
+      ) : null}
 
       {showNotifications ? (
         <NotificationsDrawer

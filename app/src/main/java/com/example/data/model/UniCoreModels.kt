@@ -15,7 +15,10 @@ enum class UserRole {
     companion object {
         fun fromRaw(raw: String?): UserRole {
             val normalized = raw?.trim()?.uppercase()?.replace('-', '_')
-            return entries.firstOrNull { it.name == normalized } ?: STUDENT
+            return when (normalized) {
+                "SUPER_ADMIN", "SUPERADMIN" -> SUPER_ADMIN
+                else -> entries.firstOrNull { it.name == normalized } ?: STUDENT
+            }
         }
     }
 }
@@ -223,7 +226,13 @@ data class AssignmentItem(
     val createdByName: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
-)
+) {
+    fun isOverdue(nowMillis: Long = System.currentTimeMillis()): Boolean =
+        dueAtMillis > 0L && nowMillis > dueAtMillis
+
+    fun isDueSoon(nowMillis: Long = System.currentTimeMillis()): Boolean =
+        dueAtMillis > 0L && dueAtMillis >= nowMillis && (dueAtMillis - nowMillis) <= 24L * 60L * 60L * 1000L
+}
 
 @Keep
 @IgnoreExtraProperties
@@ -301,7 +310,7 @@ data class SectionMessage(
     val senderRole: String = UserRole.STUDENT.name,
     val messageType: String = SectionMessageType.MESSAGE.name,
     @get:PropertyName("isPinned")
-    @param:PropertyName("isPinned")
+    @field:PropertyName("isPinned")
     val pinned: Boolean = false,
     val text: String = "",
     val videoUrl: String? = null,
@@ -510,7 +519,7 @@ object AcademicScopeFilter {
 
         val deptMatches = when {
             itemDeptId.isNullOrBlank() && itemDeptName.isNullOrBlank() -> true
-            itemDeptName.equals("ALL", ignoreCase = true) -> true
+            itemDeptId.equals("ALL", ignoreCase = true) || itemDeptName.equals("ALL", ignoreCase = true) -> true
             profile.departmentId.isNullOrBlank() && profile.departmentName.isNullOrBlank() -> true
             else -> (!profile.departmentId.isNullOrBlank() && profile.departmentId == itemDeptId) ||
                 (!profile.departmentName.isNullOrBlank() && itemDeptName.equals(profile.departmentName, ignoreCase = true))

@@ -177,7 +177,7 @@ fun StudyChatScreen(
                 pinned = sectionMsgPinned,
                 onPinnedChange = { sectionMsgPinned = it },
                 onSendSectionMessage = { deptId, deptName, yearLabel, secName ->
-                    val type = if (userRole != UserRole.STUDENT) SectionMessageType.ANNOUNCEMENT else SectionMessageType.MESSAGE
+                    val type = if (userRole != UserRole.STUDENT) SectionMessageType.NOTICE else SectionMessageType.MESSAGE
                     onSendSectionMessage(
                         deptId,
                         deptName,

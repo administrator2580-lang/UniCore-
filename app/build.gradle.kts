@@ -20,7 +20,7 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-    manifestPlaceholders["ADMOB_APP_ID"] = "ca-app-pub-3940256099942544~3347511713"
+    manifestPlaceholders["ADMOB_APP_ID"] = "ca-app-pub-6286461019975986~8066691573"
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,

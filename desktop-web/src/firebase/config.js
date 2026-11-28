@@ -148,6 +148,65 @@ export async function signOutUnified(auth) {
   await firebaseSignOut(auth);
 }
 
+export async function requestClassroomAccessToken(auth) {
+  const provider = new GoogleAuthProvider();
+  provider.addScope('https://www.googleapis.com/auth/classroom.courses.readonly');
+  provider.addScope('https://www.googleapis.com/auth/classroom.coursework.me.readonly');
+  provider.setCustomParameters({ prompt: 'consent', include_granted_scopes: 'true' });
+  const result = await signInWithPopup(auth, provider, browserPopupRedirectResolver);
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  return credential?.accessToken || null;
+}
+
+export async function fetchGoogleClassroomAssignments(accessToken) {
+  if (!accessToken) throw new Error('Google Classroom access token unavailable.');
+  const headers = { Authorization: `Bearer ${accessToken}` };
+  const coursesRes = await fetch(
+    'https://classroom.googleapis.com/v1/courses?courseStates=ACTIVE&pageSize=12',
+    { headers }
+  );
+  if (!coursesRes.ok) {
+    const errText = await coursesRes.text().catch(() => '');
+    throw new Error(`Classroom API (${coursesRes.status}): ${errText.slice(0, 140) || 'Unable to load courses.'}`);
+  }
+  const coursesJson = await coursesRes.json();
+  const activeCourses = Array.isArray(coursesJson.courses) ? coursesJson.courses.slice(0, 8) : [];
+  const collected = [];
+
+  for (const course of activeCourses) {
+    try {
+      const cwRes = await fetch(
+        `https://classroom.googleapis.com/v1/courses/${encodeURIComponent(course.id)}/courseWork?pageSize=20`,
+        { headers }
+      );
+      if (!cwRes.ok) continue;
+      const cwJson = await cwRes.json();
+      const works = Array.isArray(cwJson.courseWork) ? cwJson.courseWork : [];
+      for (const cw of works) {
+        let dueAtMillis = 0;
+        if (cw.dueDate?.year && cw.dueDate?.month && cw.dueDate?.day) {
+          const hrs = Number(cw.dueTime?.hours ?? 23);
+          const mins = Number(cw.dueTime?.minutes ?? 59);
+          dueAtMillis = Date.UTC(cw.dueDate.year, cw.dueDate.month - 1, cw.dueDate.day, hrs, mins, 0);
+        } else {
+          dueAtMillis = Date.now() + 7 * 24 * 60 * 60 * 1000;
+        }
+        collected.push({
+          externalId: `gc_${course.id}_${cw.id}`,
+          title: cw.title || 'Classroom Assignment',
+          description: cw.description || `Imported from Google Classroom (${course.name || 'Course'})`,
+          courseTitle: course.name || 'Google Classroom',
+          dueAtMillis,
+          classroomLink: cw.alternateLink || 'https://classroom.google.com'
+        });
+      }
+    } catch {
+      // Skip individual course fetch errors gracefully
+    }
+  }
+  return collected;
+}
+
 export function formatAuthError(err) {
   const code = err?.code || '';
   switch (code) {

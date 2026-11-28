@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -18,7 +19,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Assignment
@@ -417,11 +417,12 @@ private fun UniCoreAuthenticatedShell(
                 return@forEach
             }
             val inScope = AcademicScopeFilter.matchesStudentScope(
-                profile = userProfile,
-                itemDepartmentId = assignment.departmentId,
-                itemDepartmentName = assignment.departmentName,
-                itemAcademicYear = assignment.academicYear,
-                itemSectionName = assignment.sectionName
+                userProfile = userProfile,
+                userRole = userRole,
+                itemDeptId = assignment.departmentId,
+                itemDeptName = assignment.departmentName,
+                itemYear = assignment.academicYear,
+                itemSection = assignment.sectionName
             )
             if (prefs.systemNotificationsEnabled &&
                 inScope &&
