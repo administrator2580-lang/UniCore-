@@ -1,6 +1,7 @@
 package com.example.notifications
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -29,35 +30,37 @@ object UniCoreNotificationManager {
     }
 
     fun ensureChannel(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                ?: return
-            if (manager.getNotificationChannel(CHANNEL_ID) == null) {
-                val audioAttrs = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-                val channel = NotificationChannel(
-                    CHANNEL_ID,
-                    context.getString(R.string.notification_channel_name),
-                    NotificationManager.IMPORTANCE_HIGH
-                ).apply {
-                    description = context.getString(R.string.notification_channel_desc)
-                    setSound(customSoundUri(context), audioAttrs)
-                    enableVibration(true)
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                    ?: return
+                if (manager.getNotificationChannel(CHANNEL_ID) == null) {
+                    val audioAttrs = AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                    val channel = NotificationChannel(
+                        CHANNEL_ID,
+                        context.getString(R.string.notification_channel_name),
+                        NotificationManager.IMPORTANCE_HIGH
+                    ).apply {
+                        description = context.getString(R.string.notification_channel_desc)
+                        setSound(customSoundUri(context), audioAttrs)
+                        enableVibration(true)
+                    }
+                    manager.createNotificationChannel(channel)
                 }
-                manager.createNotificationChannel(channel)
-            }
-            if (manager.getNotificationChannel(CHANNEL_SILENT_ID) == null) {
-                val silentChannel = NotificationChannel(
-                    CHANNEL_SILENT_ID,
-                    "${context.getString(R.string.notification_channel_name)} (Silent)",
-                    NotificationManager.IMPORTANCE_DEFAULT
-                ).apply {
-                    description = context.getString(R.string.notification_channel_desc)
-                    setSound(null, null)
+                if (manager.getNotificationChannel(CHANNEL_SILENT_ID) == null) {
+                    val silentChannel = NotificationChannel(
+                        CHANNEL_SILENT_ID,
+                        "${context.getString(R.string.notification_channel_name)} (Silent)",
+                        NotificationManager.IMPORTANCE_DEFAULT
+                    ).apply {
+                        description = context.getString(R.string.notification_channel_desc)
+                        setSound(null, null)
+                    }
+                    manager.createNotificationChannel(silentChannel)
                 }
-                manager.createNotificationChannel(silentChannel)
             }
         }
     }
@@ -80,6 +83,7 @@ object UniCoreNotificationManager {
         }
     }
 
+    @SuppressLint("MissingPermission")
     fun showSystemNotification(
         context: Context,
         notificationIdKey: String,
@@ -87,7 +91,14 @@ object UniCoreNotificationManager {
         body: String,
         soundEnabled: Boolean = true
     ) {
-        if (!hasNotificationPermission(context)) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
         ensureChannel(context)
 
         val launchIntent = Intent(context, MainActivity::class.java).apply {
@@ -102,7 +113,7 @@ object UniCoreNotificationManager {
 
         val targetChannel = if (soundEnabled) CHANNEL_ID else CHANNEL_SILENT_ID
         val builder = NotificationCompat.Builder(context, targetChannel)
-            .setSmallIcon(R.mipmap.ic_launcher_round)
+            .setSmallIcon(R.drawable.ic_stat_unicore)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
@@ -116,9 +127,13 @@ object UniCoreNotificationManager {
             builder.setSilent(true)
         }
 
-        runCatching {
+        try {
             NotificationManagerCompat.from(context)
                 .notify(notificationIdKey.hashCode(), builder.build())
+        } catch (_: SecurityException) {
+            // Permission revoked mid-flight; ignore safely
+        } catch (_: Throwable) {
+            // Prevent notification failures from crashing the app
         }
     }
 

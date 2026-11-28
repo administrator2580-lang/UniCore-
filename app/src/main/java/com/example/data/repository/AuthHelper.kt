@@ -86,7 +86,7 @@ fun attemptAutoSignIn(
             } else {
                 onUnauthenticated()
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             onUnauthenticated()
         }
     }

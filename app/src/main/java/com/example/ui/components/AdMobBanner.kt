@@ -26,6 +26,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
 import com.google.android.gms.ads.AdListener
 import com.google.android.gms.ads.AdRequest
@@ -38,15 +39,20 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 private const val DEFAULT_TEST_BANNER_UNIT_ID = "ca-app-pub-3940256099942544/6300978111"
 private val mobileAdsInitialized = AtomicBoolean(false)
+private val _mobileAdsReady = MutableStateFlow(false)
+val mobileAdsReady: StateFlow<Boolean> = _mobileAdsReady.asStateFlow()
 
 fun initializeMobileAdsOnce(context: Context) {
     if (mobileAdsInitialized.compareAndSet(false, true)) {
         val appContext = context.applicationContext
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate).launch {
             runCatching {
                 if (BuildConfig.DEBUG) {
                     val config = RequestConfiguration.Builder()
@@ -54,7 +60,11 @@ fun initializeMobileAdsOnce(context: Context) {
                         .build()
                     MobileAds.setRequestConfiguration(config)
                 }
-                MobileAds.initialize(appContext) {}
+                MobileAds.initialize(appContext) {
+                    _mobileAdsReady.value = true
+                }
+            }.onFailure {
+                _mobileAdsReady.value = false
             }
         }
     }
@@ -82,10 +92,13 @@ fun AdMobBannerBar(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val adUnitId = remember { resolveBannerAdUnitId() }
+    val adsReady by mobileAdsReady.collectAsStateWithLifecycle()
 
     LaunchedEffect(context) {
         initializeMobileAdsOnce(context)
     }
+
+    if (!adsReady) return
 
     BoxWithConstraints(
         modifier = modifier
@@ -97,43 +110,47 @@ fun AdMobBannerBar(
         var adFailed by remember(adUnitId, adWidthDp) { mutableStateOf(false) }
 
         val adView = remember(context, adUnitId, adWidthDp) {
-            AdView(context).apply {
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-                this.adUnitId = adUnitId
-                setAdSize(
-                    AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(
-                        context,
-                        adWidthDp
+            runCatching {
+                AdView(context).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
                     )
-                )
-                adListener = object : AdListener() {
-                    override fun onAdLoaded() {
-                        adFailed = false
-                    }
+                    this.adUnitId = adUnitId
+                    setAdSize(
+                        AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(
+                            context,
+                            adWidthDp
+                        )
+                    )
+                    adListener = object : AdListener() {
+                        override fun onAdLoaded() {
+                            adFailed = false
+                        }
 
-                    override fun onAdFailedToLoad(error: LoadAdError) {
-                        adFailed = true
+                        override fun onAdFailedToLoad(error: LoadAdError) {
+                            adFailed = true
+                        }
                     }
+                    loadAd(AdRequest.Builder().build())
                 }
-                loadAd(AdRequest.Builder().build())
-            }
+            }.getOrNull()
         }
+
+        if (adView == null) return@BoxWithConstraints
 
         DisposableEffect(lifecycleOwner, adView) {
             val observer = LifecycleEventObserver { _, event ->
                 when (event) {
-                    Lifecycle.Event.ON_RESUME -> adView.resume()
-                    Lifecycle.Event.ON_PAUSE -> adView.pause()
+                    Lifecycle.Event.ON_RESUME -> runCatching { adView.resume() }
+                    Lifecycle.Event.ON_PAUSE -> runCatching { adView.pause() }
                     else -> Unit
                 }
             }
             lifecycleOwner.lifecycle.addObserver(observer)
             onDispose {
                 lifecycleOwner.lifecycle.removeObserver(observer)
-                adView.destroy()
+                runCatching { adView.destroy() }
             }
         }
 

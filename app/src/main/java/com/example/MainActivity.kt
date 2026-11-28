@@ -129,9 +129,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        configureAppCheck(this, intent)
-        initializeMobileAdsOnce(applicationContext)
-        UniCoreNotificationManager.ensureChannel(applicationContext)
+        runCatching { configureAppCheck(this, intent) }
+        runCatching { initializeMobileAdsOnce(applicationContext) }
+        runCatching { UniCoreNotificationManager.ensureChannel(applicationContext) }
 
         enableEdgeToEdge()
         setContent {
