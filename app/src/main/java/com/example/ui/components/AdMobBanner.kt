@@ -49,11 +49,12 @@ private val mobileAdsInitialized = AtomicBoolean(false)
 private val _mobileAdsReady = MutableStateFlow(false)
 val mobileAdsReady: StateFlow<Boolean> = _mobileAdsReady.asStateFlow()
 
-fun initializeMobileAdsOnce(context: Context) {
+fun initializeMobileAdsOnce(context: Context, enabled: Boolean = true) {
+    if (!enabled) return
     if (mobileAdsInitialized.compareAndSet(false, true)) {
         val appContext = context.applicationContext
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            runCatching {
+            try {
                 if (BuildConfig.DEBUG) {
                     val config = RequestConfiguration.Builder()
                         .setTestDeviceIds(listOf(AdRequest.DEVICE_ID_EMULATOR))
@@ -63,7 +64,7 @@ fun initializeMobileAdsOnce(context: Context) {
                 MobileAds.initialize(appContext) {
                     _mobileAdsReady.value = true
                 }
-            }.onFailure { err ->
+            } catch (err: Throwable) {
                 android.util.Log.w("AdMobBanner", "Safe MobileAds init skipped", err)
                 _mobileAdsReady.value = false
             }
@@ -88,15 +89,20 @@ internal fun resolveBannerAdUnitId(
 
 @Composable
 fun AdMobBannerBar(
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
 ) {
+    if (!enabled) return
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val adUnitId = remember { resolveBannerAdUnitId() }
     val adsReady by mobileAdsReady.collectAsStateWithLifecycle()
 
-    LaunchedEffect(context) {
-        initializeMobileAdsOnce(context)
+    LaunchedEffect(context, enabled) {
+        if (enabled && !adsReady) {
+            kotlinx.coroutines.delay(1_200L)
+            initializeMobileAdsOnce(context, enabled = true)
+        }
     }
 
     if (!adsReady) return

@@ -126,17 +126,14 @@ import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+private const val ENABLE_ADMOB_ON_STARTUP = true
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        runCatching { enableEdgeToEdge() }
 
-        runCatching {
-            if (FirebaseApp.getApps(applicationContext).isEmpty()) {
-                FirebaseApp.initializeApp(applicationContext)
-            }
-        }
-        runCatching { configureAppCheck(this, intent) }
+        safeInitializeFirebase()
         runCatching { UniCoreNotificationManager.ensureChannel(applicationContext) }
 
         setContent {
@@ -162,6 +159,17 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    private fun safeInitializeFirebase() {
+        try {
+            if (FirebaseApp.getApps(applicationContext).isEmpty()) {
+                FirebaseApp.initializeApp(applicationContext)
+            }
+            configureAppCheck(this, intent)
+        } catch (err: Throwable) {
+            android.util.Log.e("MainActivity", "Safe Firebase/AppCheck setup failed", err)
         }
     }
 }
@@ -206,9 +214,24 @@ fun UniCoreApp(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    var adsSafeMode by remember {
+        mutableStateOf(StartupCrashGuard.isAdIsolationActive(context.applicationContext))
+    }
+    var lastCrashSummary by remember {
+        mutableStateOf(StartupCrashGuard.getLastCrashSummary(context.applicationContext))
+    }
+    val adsEnabled = ENABLE_ADMOB_ON_STARTUP && !adsSafeMode
 
-    LaunchedEffect(Unit) {
-        initializeMobileAdsOnce(context.applicationContext)
+    LaunchedEffect(adsEnabled) {
+        if (adsEnabled) {
+            // Defer MobileAds init cleanly until after the first UI frame has painted
+            delay(1_200L)
+            try {
+                initializeMobileAdsOnce(context.applicationContext, enabled = true)
+            } catch (err: Throwable) {
+                android.util.Log.w("MainActivity", "Safe MobileAds deferred init failed", err)
+            }
+        }
     }
 
     val auth = remember(context, authOverride) {
@@ -250,25 +273,46 @@ fun UniCoreApp(
         scope.launch { prefsRepository.setLanguage(lang) }
     }
 
-    val user = currentUser
-    if (user == null) {
-        AuthScreen(
-            currentLanguage = prefs.language,
-            currentThemeMode = prefs.themeMode,
-            onToggleLanguage = setLanguage,
-            onCycleTheme = cycleTheme,
-            onAuthSuccess = { currentUser = auth.currentUser }
-        )
-    } else {
-        val uid = user.uid
-        key(uid) {
-            UniCoreAuthenticatedShell(
-                currentUserId = uid,
-                prefs = prefs,
-                prefsRepository = prefsRepository,
-                onSetLanguage = setLanguage,
-                onCycleTheme = cycleTheme
+    Column(modifier = Modifier.fillMaxSize()) {
+        if (lastCrashSummary != null) {
+            StartupCrashDiagnosticBanner(
+                summary = lastCrashSummary.orEmpty(),
+                adsIsolated = adsSafeMode,
+                onDismiss = {
+                    StartupCrashGuard.dismissLastCrashOnly(context.applicationContext)
+                    lastCrashSummary = null
+                },
+                onReEnableAds = {
+                    StartupCrashGuard.clearCrashStateAndResumeAds(context.applicationContext)
+                    adsSafeMode = false
+                    lastCrashSummary = null
+                }
             )
+        }
+
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            val user = currentUser
+            if (user == null) {
+                AuthScreen(
+                    currentLanguage = prefs.language,
+                    currentThemeMode = prefs.themeMode,
+                    onToggleLanguage = setLanguage,
+                    onCycleTheme = cycleTheme,
+                    onAuthSuccess = { currentUser = auth.currentUser }
+                )
+            } else {
+                val uid = user.uid
+                key(uid) {
+                    UniCoreAuthenticatedShell(
+                        currentUserId = uid,
+                        prefs = prefs,
+                        prefsRepository = prefsRepository,
+                        adsEnabled = adsEnabled,
+                        onSetLanguage = setLanguage,
+                        onCycleTheme = cycleTheme
+                    )
+                }
+            }
         }
     }
 }
@@ -279,6 +323,7 @@ private fun UniCoreAuthenticatedShell(
     currentUserId: String,
     prefs: UserPreferences,
     prefsRepository: UserPreferencesRepository,
+    adsEnabled: Boolean,
     onSetLanguage: (AppLanguage) -> Unit,
     onCycleTheme: () -> Unit
 ) {
@@ -624,8 +669,11 @@ private fun UniCoreAuthenticatedShell(
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             bottomBar = {
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    if (!isTakingQuiz) {
-                        AdMobBannerBar(modifier = Modifier.fillMaxWidth())
+                    if (!isTakingQuiz && adsEnabled) {
+                        AdMobBannerBar(
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = adsEnabled
+                        )
                     }
                     if (!useNavigationRail) {
                         NavigationBar {
@@ -1034,6 +1082,62 @@ private fun AccountSuspendedGate(
                         Spacer(Modifier.size(8.dp))
                         Text(signOutLabel)
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StartupCrashDiagnosticBanner(
+    summary: String,
+    adsIsolated: Boolean,
+    onDismiss: () -> Unit,
+    onReEnableAds: () -> Unit
+) {
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = if (adsIsolated) "Safe Mode Active (AdMob Isolated)" else "Previous Crash Diagnostic",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            Text(
+                text = summary,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                maxLines = 5,
+                overflow = TextOverflow.Ellipsis
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TextButton(
+                    onClick = {
+                        clipboard.setText(androidx.compose.ui.text.AnnotatedString(summary))
+                    }
+                ) {
+                    Text("Copy")
+                }
+                if (adsIsolated) {
+                    TextButton(onClick = onReEnableAds) {
+                        Text("Retry Ads")
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDismiss) {
+                    Text("Dismiss")
                 }
             }
         }
