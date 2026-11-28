@@ -55,13 +55,15 @@ fun initializeMobileAdsOnce(context: Context, enabled: Boolean = true) {
         val appContext = context.applicationContext
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
-                if (BuildConfig.DEBUG) {
-                    val config = RequestConfiguration.Builder()
-                        .setTestDeviceIds(listOf(AdRequest.DEVICE_ID_EMULATOR))
-                        .build()
-                    MobileAds.setRequestConfiguration(config)
-                }
                 MobileAds.initialize(appContext) {
+                    if (BuildConfig.DEBUG) {
+                        runCatching {
+                            val config = RequestConfiguration.Builder()
+                                .setTestDeviceIds(listOf(AdRequest.DEVICE_ID_EMULATOR))
+                                .build()
+                            MobileAds.setRequestConfiguration(config)
+                        }
+                    }
                     _mobileAdsReady.value = true
                 }
             } catch (err: Throwable) {

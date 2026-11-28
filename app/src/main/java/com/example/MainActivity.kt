@@ -131,12 +131,39 @@ private const val ENABLE_ADMOB_ON_STARTUP = true
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        StartupCrashGuard.installUncaughtHandlerEarly(applicationContext)
         runCatching { enableEdgeToEdge() }
 
-        safeInitializeFirebase()
+        val startInFullRecovery = StartupCrashGuard.isFullRecoveryMode(applicationContext)
+        if (!startInFullRecovery) {
+            safeInitializeFirebase()
+        }
         runCatching { UniCoreNotificationManager.ensureChannel(applicationContext) }
 
         setContent {
+            var inFullRecovery by remember { mutableStateOf(startInFullRecovery) }
+            if (inFullRecovery) {
+                MaterialTheme {
+                    Surface(modifier = Modifier.fillMaxSize()) {
+                        SafeRecoveryScreen(
+                            crashSummary = StartupCrashGuard.getLastCrashSummary(applicationContext)
+                                ?: "Startup crash detected. Launch in safe mode or copy report.",
+                            onBootWithoutAds = {
+                                StartupCrashGuard.bootWithoutAds(applicationContext)
+                                safeInitializeFirebase()
+                                inFullRecovery = false
+                            },
+                            onRetryFullBoot = {
+                                StartupCrashGuard.clearCrashStateAndResumeAds(applicationContext)
+                                safeInitializeFirebase()
+                                inFullRecovery = false
+                            }
+                        )
+                    }
+                }
+                return@setContent
+            }
+
             val prefsRepository = remember { UserPreferencesRepository(applicationContext) }
             val prefs by prefsRepository.preferencesFlow.collectAsStateWithLifecycle(initialValue = UserPreferences())
             val appStrings = remember(prefs.language) { stringsFor(prefs.language) }
@@ -221,6 +248,11 @@ fun UniCoreApp(
         mutableStateOf(StartupCrashGuard.getLastCrashSummary(context.applicationContext))
     }
     val adsEnabled = ENABLE_ADMOB_ON_STARTUP && !adsSafeMode
+
+    LaunchedEffect(Unit) {
+        delay(5_000L)
+        StartupCrashGuard.markHealthyLaunch(context.applicationContext)
+    }
 
     LaunchedEffect(adsEnabled) {
         if (adsEnabled) {
@@ -1182,6 +1214,65 @@ private fun StartupServiceUnavailableGate(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SafeRecoveryScreen(
+    crashSummary: String,
+    onBootWithoutAds: () -> Unit,
+    onRetryFullBoot: () -> Unit
+) {
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    Scaffold(contentWindowInsets = WindowInsets.safeDrawing) { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(20.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier.widthIn(max = 520.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "UniCore Safe Recovery",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Text(
+                        text = crashSummary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(
+                            onClick = {
+                                clipboard.setText(androidx.compose.ui.text.AnnotatedString(crashSummary))
+                            }
+                        ) {
+                            Text("Copy")
+                        }
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = onRetryFullBoot) {
+                            Text("Retry Full")
+                        }
+                        Button(onClick = onBootWithoutAds) {
+                            Text("Safe Boot")
+                        }
+                    }
                 }
             }
         }

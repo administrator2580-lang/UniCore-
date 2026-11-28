@@ -56,11 +56,10 @@ class UserPreferencesRepository(private val context: Context) {
 
     val preferencesFlow: Flow<UserPreferences> = context.userPrefsDataStore.data
         .catch { exception ->
-            if (exception is IOException) {
-                emit(emptyPreferences())
-            } else {
+            if (exception is kotlinx.coroutines.CancellationException) {
                 throw exception
             }
+            emit(emptyPreferences())
         }
         .map { prefs ->
             UserPreferences(

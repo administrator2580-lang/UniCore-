@@ -92,8 +92,8 @@ class UniCoreRepository(
         governance: UniCoreGovernanceRepository,
         context: Context? = null
     ): Result<UserRole> {
-        val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Not authenticated"))
-        val user = auth.currentUser!!
+        val user = auth.currentUser ?: return Result.failure(IllegalStateException("Not authenticated"))
+        val uid = user.uid
         val prefs = context?.applicationContext?.getSharedPreferences(FAST_SESSION_PREFS, Context.MODE_PRIVATE)
         return try {
             val today = ZeroCostQuotaManager.currentUtcDayKey()

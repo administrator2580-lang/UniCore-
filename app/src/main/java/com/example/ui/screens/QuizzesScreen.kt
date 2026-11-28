@@ -593,9 +593,10 @@ private fun TakeQuizDialog(
                     when {
                         loadingImage -> CircularProgressIndicator(modifier = Modifier.size(24.dp))
                         quizImageBitmap != null -> {
-                            val bmp = quizImageBitmap!!
-                            Image(
-                                bitmap = bmp.asImageBitmap(),
+                            val bmp = quizImageBitmap
+                            if (bmp != null) {
+                                Image(
+                                    bitmap = bmp.asImageBitmap(),
                                 contentDescription = quiz.imageName.ifBlank { "Quiz figure" },
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier
@@ -603,7 +604,8 @@ private fun TakeQuizDialog(
                                     .heightIn(max = 200.dp)
                                     .clip(MaterialTheme.shapes.small)
                                     .clickable { zoomImage = true }
-                            )
+                                )
+                            }
                         }
                     }
                 }
@@ -655,12 +657,13 @@ private fun TakeQuizDialog(
         }
     )
 
-    if (zoomImage && quizImageBitmap != null) {
+    val zoomedBitmap = quizImageBitmap
+    if (zoomImage && zoomedBitmap != null) {
         AlertDialog(
             onDismissRequest = { zoomImage = false },
             text = {
                 Image(
-                    bitmap = quizImageBitmap!!.asImageBitmap(),
+                    bitmap = zoomedBitmap.asImageBitmap(),
                     contentDescription = quiz.imageName,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
